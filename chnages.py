@@ -1,624 +1,1018 @@
-"""
-CV Routes - Consolidated CV API endpoints
-Handles ALL CV operations: upload, processing, listing, and management.
-Single responsibility: CV document management through REST API.
-"""
+'use client';
+import React, { useState, useEffect } from 'react';
+import {
+  FileText,
+  Users,
+  Trash2,
+  RefreshCw,
+  Eye,
+  Download,
+  AlertCircle,
+  CheckCircle,
+  Clock,
+  X,
+  Target,
+  Play,
+  ChevronDown,
+  Search,
+  Database,
+  AlertTriangle
+} from 'lucide-react';
+import { useAppStore } from '@/stores/appStore';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card-enhanced';
+import { Button } from '@/components/ui/button-enhanced';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { api } from '@/lib/api';
 
-import logging
-import os
-import uuid
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+/* ----------------------------- Small utilities ---------------------------- */
+/* ----------------------------- Small utilities ---------------------------- */
+const toNum = (v: unknown) => {
+  if (v === null || v === undefined) return undefined;
+  const n = typeof v === 'string' ? Number(v) : v;
+  return Number.isFinite(n as number) ? (n as number) : undefined;
+};
+const firstNumber = (...vals: unknown[]) => {
+  for (const v of vals) {
+    const n = toNum(v);
+    if (n !== undefined) return n;
+  }
+  return 0;
+};
+const len = (a: unknown) => (Array.isArray(a) ? a.length : undefined);
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from fastapi.responses import JSONResponse,FileResponse, StreamingResponse
-from pydantic import BaseModel
-from app.services.parsing_service import get_parsing_service
-from app.services.llm_service import get_llm_service
-from app.services.embedding_service import get_embedding_service
-from app.utils.qdrant_utils import get_qdrant_utils
-# at top of the file
-import mimetypes
-import shutil
-from io import BytesIO
+const formatDate = (dateString?: string) => {
+  if (!dateString) return 'N/A';
+  try {
+    return new Date(dateString).toLocaleDateString();
+  } catch {
+    return 'N/A';
+  }
+};
 
-STORAGE_DIR = os.getenv("CV_UPLOAD_DIR", "/data/uploads/cv")
-os.makedirs(STORAGE_DIR, exist_ok=True)
-logger = logging.getLogger(__name__)
-router = APIRouter()
+/** Robustly derive name/title/years + counts across shapes */
+export const getCVBasics = (cv: any) => {
+  const cvData = cv?.cv || cv;
+  const candidate = cvData?.candidate || {};
+  const structured = cvData?.structured_info || {};
 
-# Constants
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-SUPPORTED_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt', '.png', '.jpg', '.jpeg']
+  const name =
+    candidate?.full_name ?? cvData?.full_name ?? 'Unknown';
+  const title =
+    candidate?.job_title ?? cvData?.job_title ?? 'Unknown';
+  const years =
+    candidate?.years_of_experience ?? cvData?.years_of_experience ?? '0';
+
+  // ✅ Include possible counts at the root level of list items
+  const skillsCount = firstNumber(
+    candidate?.skills_count,
+    cvData?.skills_count,
+    structured?.skills_count,
+    len(candidate?.skills),
+    len(structured?.skills),
+    len(structured?.skills_sentences),
+    len(cvData?.skills)
+  );
+
+  const respCount = firstNumber(
+    candidate?.responsibilities_count,
+    cvData?.responsibilities_count,               // <-- added
+    structured?.responsibilities_count,
+    len(candidate?.responsibilities),
+    len(structured?.responsibilities),
+    len(structured?.responsibility_sentences),
+    len(cvData?.responsibilities)
+  );
+
+  return { name, title, years, skillsCount, respCount };
+};
 
 
-class StandardizeCVRequest(BaseModel):
-    cv_text: str
-    cv_filename: str = "cv.txt"
 
+const getJDBasics = (jd: any) => {
+  // Handle nested API response structure: response.jd or direct response
+  const jdData = jd?.jd || jd;
+  const src = jdData?.job_requirements || jdData?.structured_info || {};
+  
+  const title = src.job_title ?? jdData?.job_title ?? 'N/A';
+  const years =
+    src.years_of_experience ?? src.experience_years ?? jdData?.years_of_experience ?? '0';
+  const skills =
+    src.skills ??
+    jdData?.skills ??
+    [];
+  const responsibilities =
+    src.responsibilities ??
+    src.responsibility_sentences ??
+    jdData?.responsibilities ??
+    [];
+  const skillsCount =
+    src.skills_count ?? jdData?.skills_count ?? (Array.isArray(skills) ? skills.length : 0);
+  const responsibilitiesCount =
+    src.responsibilities_count ??
+    jdData?.responsibilities_count ??
+    (Array.isArray(responsibilities) ? responsibilities.length : 0);
+  return { title, years, skills, responsibilities, skillsCount, responsibilitiesCount };
+};
 
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
-
-@router.post("/upload-cv")
-async def upload_cv(
-    file: Optional[UploadFile] = File(None),
-    cv_text: Optional[str] = Form(None)
-) -> JSONResponse:
-    try:
-        logger.info("---------- CV UPLOAD START ----------")
-        parsing_service = get_parsing_service()
-        raw_content = ""
-        extracted_text = ""
-        filename = "text_input.txt"
-        file_ext = ".txt"
-        persisted_path: Optional[str] = None
-        extracted_pii = {"email": [], "phone": []}  # Initialize PII container
+/* -------------------------------- Component ------------------------------- */
+export default function DatabasePageNew() {
+  const {
+    cvs,
+    jds,
+    selectedCVs,
+    selectedJD,
+    loadingStates,
+    loadCVs,
+    loadJDs,
+    selectCV,
+    deselectCV,
+    selectAllCVs,
+    deselectAllCVs,
+    selectJD,
+    deleteCV,
+    deleteJD,
+    reprocessCV,
+    reprocessJD,
+    setCurrentTab,
+    runMatch,
+  } = useAppStore();
+  
+  const [selectedCVForDetails, setSelectedCVForDetails] = useState<string | null>(null);
+  const [selectedJDForDetails, setSelectedJDForDetails] = useState<string | null>(null);
+  const [showJDJSON, setShowJDJSON] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filteredCVs, setFilteredCVs] = useState<any[]>([]);
+  const [filteredJDs, setFilteredJDs] = useState<any[]>([]);
+  const [showClearDialog, setShowClearDialog] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  
+  useEffect(() => {
+    loadCVs();
+    loadJDs();
+  }, [loadCVs, loadJDs]);
+  
+  useEffect(() => {
+    // Filter CVs based on search query
+    if (!searchQuery.trim()) {
+      setFilteredCVs(cvs);
+    } else {
+      const query = searchQuery.toLowerCase();
+      const filtered = cvs.filter(cv => {
+        const basics = getCVBasics(cv);
+        return (
+          basics.name.toLowerCase().includes(query) ||
+          cv.id.toLowerCase().includes(query) ||
+          basics.title.toLowerCase().includes(query)
+        );
+      });
+      setFilteredCVs(filtered);
+    }
+  }, [cvs, searchQuery]);
+  
+  useEffect(() => {
+    // Filter JDs based on search query
+    if (!searchQuery.trim()) {
+      setFilteredJDs(jds);
+    } else {
+      const query = searchQuery.toLowerCase();
+      const filtered = jds.filter(jd => {
+        const basics = getJDBasics(jd);
+        return (
+          jd.id.toLowerCase().includes(query) ||
+          basics.title.toLowerCase().includes(query)
+        );
+      });
+      setFilteredJDs(filtered);
+    }
+  }, [jds, searchQuery]);
+  
+  const isLoadingCVs = loadingStates.cvs.isLoading;
+  const isLoadingJDs = loadingStates.jds.isLoading;
+  const isDeleting = loadingStates.upload.isLoading;
+  
+  const handleDeleteCV = async (cvId: string) => {
+    if (window.confirm('Are you sure you want to delete this CV?')) {
+      await deleteCV(cvId);
+    }
+  };
+  
+  const handleDeleteJD = async (jdId: string) => {
+    if (window.confirm('Are you sure you want to delete this job description?')) {
+      await deleteJD(jdId);
+    }
+  };
+  
+  const handleReprocessCV = async (cvId: string) => {
+    await reprocessCV(cvId);
+  };
+  
+  const handleReprocessJD = async (jdId: string) => {
+    await reprocessJD(jdId);
+  };
+  
+  const canStartMatching = selectedCVs.length > 0 && selectedJD;
+  const handleStartMatching = async () => {
+    await runMatch();
+    setCurrentTab('match');
+  };
+  
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchQuery(e.target.value);
+  };
+  
+  const clearSearch = () => {
+    setSearchQuery('');
+  };
+  
+  const handleClearDatabase = async () => {
+    setIsClearing(true);
+    try {
+      await api.clearDatabase(true);
+      await loadCVs();
+      await loadJDs();
+      setShowClearDialog(false);
+    } catch (error: any) {
+      console.error('Failed to clear database:', error);
+    } finally {
+      setIsClearing(false);
+    }
+  };
+  
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="heading-lg">Document Database</h1>
+          <p className="text-lg mt-1" style={{ color: 'var(--gray-600)' }}>
+            Manage your CVs and job descriptions
+          </p>
+        </div>
+        <div className="flex items-center space-x-3">
+          <Dialog open={showClearDialog} onOpenChange={setShowClearDialog}>
+            <DialogTrigger asChild>
+              <Button
+                variant="outline"
+                className="text-red-600 border-red-300 hover:bg-red-50"
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Clear Database
+              </Button>
+            </DialogTrigger>
+            <DialogContent
+  className="bg-rose-50 border border-rose-300 shadow-xl rounded-lg p-6 data-[state=open]:animate-in 
+             data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 
+             data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
+>
+  <DialogHeader>
+    <DialogTitle className="flex items-center gap-2 text-rose-700">
+      <AlertTriangle className="h-5 w-5 text-rose-500" />
+      Confirm Database Clear
+    </DialogTitle>
+  </DialogHeader>
+  <div className="space-y-4">
+    <p className="text-gray-800">
+      Are you sure you want to permanently delete all CVs and job descriptions?
+    </p>
+    <p className="text-sm text-rose-600 font-medium">This action cannot be undone.</p>
+    <div className="flex justify-end space-x-2">
+      <Button variant="outline" onClick={() => setShowClearDialog(false)}>
+        Cancel
+      </Button>
+      <Button
+        variant="error"
+        onClick={handleClearDatabase}
+        disabled={isClearing}
+        className="bg-rose-600 hover:bg-rose-700"
+      >
+        {isClearing ? 'Clearing...' : 'Clear All Data'}
+      </Button>
+    </div>
+  </div>
+</DialogContent>
+          </Dialog>
+          <Button
+            variant="outline"
+            onClick={() => {
+              loadCVs();
+              loadJDs();
+            }}
+            disabled={isLoadingCVs || isLoadingJDs}
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Refresh
+          </Button>
+          {canStartMatching && (
+            <Button
+              variant="primary"
+              onClick={handleStartMatching}
+              disabled={loadingStates.matching.isLoading}
+            >
+              <Play className="w-4 h-4 mr-2" />
+              {loadingStates.matching.isLoading ? 'Matching...' : 'Match Selected'}
+            </Button>
+          )}
+        </div>
+      </div>
+      
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <Card className="p-6">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-blue-100 rounded-lg">
+              <Users className="w-6 h-6 text-blue-600" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-500">Total CVs</p>
+              <p className="text-2xl font-bold text-gray-900">{cvs.length}</p>
+            </div>
+          </div>
+        </Card>
+        <Card className="p-6">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-green-100 rounded-lg">
+              <FileText className="w-6 h-6 text-green-600" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-500">Job Descriptions</p>
+              <p className="text-2xl font-bold text-gray-900">{jds.length}</p>
+            </div>
+          </div>
+        </Card>
+        <Card className="p-6">
+          <div className="flex items-center space-x-3">
+            <div className="p-2 bg-purple-100 rounded-lg">
+              <Target className="w-6 h-6 text-purple-600" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-500">Ready to Match</p>
+              <p className="text-2xl font-bold text-gray-900">{canStartMatching ? 'Yes' : 'No'}</p>
+            </div>
+          </div>
+        </Card>
+      </div>
+      
+      {/* Search Bar */}
+      <Card className="p-4">
+        <div className="flex items-center space-x-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <input
+              type="text"
+              placeholder="Search by name, ID, or job title..."
+              value={searchQuery}
+              onChange={handleSearchChange}
+              className="w-full pl-10 pr-8 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {searchQuery && (
+              <button
+                onClick={clearSearch}
+                className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+        {searchQuery && (
+          <div className="mt-2 text-sm text-gray-500">
+            Showing {filteredCVs.length} of {cvs.length} CVs and {filteredJDs.length} of {jds.length} Job Descriptions
+          </div>
+        )}
+      </Card>
+      
+      {/* Document Tabs */}
+      <Tabs defaultValue="cvs" className="w-full">
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="cvs" className="flex items-center space-x-2">
+            <Users className="w-4 h-4" />
+            <span>CVs ({filteredCVs.length})</span>
+          </TabsTrigger>
+          <TabsTrigger value="jds" className="flex items-center space-x-2">
+            <FileText className="w-4 h-4" />
+            <span>Job Descriptions ({filteredJDs.length})</span>
+          </TabsTrigger>
+        </TabsList>
         
-        if file:
-            logger.info(f"Processing CV file upload: {file.filename}")
-            if not file.filename:
-                raise HTTPException(status_code=400, detail="No filename provided")
-            file_ext = os.path.splitext(file.filename)[1].lower()
-            if file_ext not in SUPPORTED_EXTENSIONS:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {file_ext}. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
-                )
-            # size check
-            file.file.seek(0, 2)
-            size = file.file.tell()
-            file.file.seek(0)
-            if size > MAX_FILE_SIZE:
-                raise HTTPException(status_code=400, detail=f"File too large: {size} bytes (max: {MAX_FILE_SIZE})")
-            import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                shutil.copyfileobj(file.file, tmp)
-                tmp_path = tmp.name
-            try:
-                parsed = parsing_service.process_document(tmp_path, "cv")
-                raw_content = parsed["raw_text"]
-                extracted_text = parsed["clean_text"]
-                filename = file.filename
-                # Get PII from parsed document
-                extracted_pii = parsed.get("extracted_pii", {"email": [], "phone": []})
-            finally:
-                # leave tmp for now; we may copy it into our storage folder below
-                pass
-        elif cv_text:
-            logger.info("Processing CV text input")
-            cleaned, extracted_pii = parsing_service.remove_pii_data(cv_text.strip())
-            raw_content = cv_text.strip()
-            extracted_text = cleaned
-            filename = "text_input.txt"
-            if len(extracted_text) < 50:
-                raise HTTPException(status_code=400, detail="CV text too short (minimum 50 characters required)")
-        else:
-            raise HTTPException(status_code=400, detail="Either file upload or cv_text must be provided")
+        {/* CVs Tab */}
+        <TabsContent value="cvs" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle>Candidate CVs</CardTitle>
+                <div className="flex items-center space-x-2">
+                  <Button variant="outline" size="sm" onClick={selectAllCVs} disabled={filteredCVs.length === 0}>
+                    Select All
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={deselectAllCVs} disabled={selectedCVs.length === 0}>
+                    Deselect All
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {isLoadingCVs ? (
+                <div className="flex items-center justify-center py-8">
+                  <Clock className="w-6 h-6 animate-spin mr-2" />
+                  <span>Loading CVs...</span>
+                </div>
+              ) : filteredCVs.length === 0 ? (
+                <div className="text-center py-8">
+                  <AlertCircle className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">
+                    {searchQuery ? 'No CVs match your search' : 'No CVs uploaded'}
+                  </h3>
+                  <p className="text-gray-500 mb-4">
+                    {searchQuery 
+                      ? 'Try adjusting your search terms' 
+                      : 'Upload CVs to get started with matching'}
+                  </p>
+                  {!searchQuery && (
+                    <Button onClick={() => setCurrentTab('upload')}>Upload CVs</Button>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {filteredCVs.map((cv) => {
+                    const b = getCVBasics(cv);
+                    return (
+                      <div
+                        key={cv.id}
+                        className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50"
+                      >
+                        <div className="flex items-center space-x-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedCVs.includes(cv.id)}
+                            onChange={() => {
+                              if (selectedCVs.includes(cv.id)) {
+                                deselectCV(cv.id);
+                              } else {
+                                selectCV(cv.id);
+                              }
+                            }}
+                            className="h-4 w-4 text-blue-600 rounded"
+                          />
+                          <div className="p-2 bg-blue-100 rounded-lg">
+                            <Users className="w-5 h-5 text-blue-600" />
+                          </div>
+                          <div>
+                            <h4 className="font-medium text-gray-900">{b.name}</h4>
+                            <p className="text-sm text-gray-500">
+                              {b.title} • {b.years} years
+                            </p>
+                            <div className="flex items-center space-x-2 mt-1">
+                              <Badge variant="secondary">{b.skillsCount} skills</Badge>
+                              <Badge variant="outline">{b.respCount} responsibilities</Badge>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setSelectedCVForDetails(cv.id)}
+                              >
+                                <Eye className="w-4 h-4" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto bg-white rounded-lg shadow-xl">
+                              <DialogHeader className="flex flex-row items-center justify-between">
+                                <DialogTitle className="text-xl font-semibold">CV Details</DialogTitle>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setSelectedCVForDetails(null)}
+                                  className="h-6 w-6 rounded-full hover:bg-gray-100"
+                                >
+                                  <X className="h-4 w-4" />
+                                </Button>
+                              </DialogHeader>
+                              <CVDetails cvId={cv.id} />
+                            </DialogContent>
+                          </Dialog>
+                          <Button variant="ghost" size="sm" onClick={() => handleReprocessCV(cv.id)} disabled={isDeleting}>
+                            <RefreshCw className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDeleteCV(cv.id)}
+                            disabled={isDeleting}
+                            className="text-red-500 hover:text-red-700"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
         
-        logger.info(f"✅ Text ready -> length={len(extracted_text)} (pii removed)")
-        logger.info(f"📋 Extracted PII -> emails: {len(extracted_pii.get('email', []))}, phones: {len(extracted_pii.get('phone', []))}")
-        
-        # ---- LLM standardization ----
-        logger.info("---------- STEP 1: LLM STANDARDIZATION ----------")
-        llm = get_llm_service()
-        standardized = llm.standardize_cv(extracted_text, filename)
-        
-        # Merge extracted PII into standardized data
-        logger.info("---------- STEP 1b: MERGING PII ----------")
-        # Ensure contact_info exists in standardized data
-        if "contact_info" not in standardized:
-            standardized["contact_info"] = {}
-        
-        # Add extracted PII to contact_info
-        if extracted_pii.get("email") and len(extracted_pii["email"]) > 0:
-            standardized["contact_info"]["email"] = extracted_pii["email"][0]
-            logger.info(f"✅ Added email to contact_info: {standardized['contact_info']['email']}")
-        if extracted_pii.get("phone") and len(extracted_pii["phone"]) > 0:
-            standardized["contact_info"]["phone"] = extracted_pii["phone"][0]
-            logger.info(f"✅ Added phone to contact_info: {standardized['contact_info']['phone']}")
-        
-        # ---- EXACT embeddings (32 vectors) ----
-        logger.info("---------- STEP 2: EMBEDDING GENERATION (32 vectors) ----------")
-        emb_service = get_embedding_service()
-        doc_embeddings = emb_service.generate_document_embeddings(standardized)
-        
-        # ---- Store across Qdrant collections ----
-        logger.info("---------- STEP 3: DATABASE STORAGE ----------")
-        qdrant = get_qdrant_utils()
-        cv_id = str(uuid.uuid4())
-        
-        # Persist the original file (or synthesize a .txt if text input)
-        try:
-            if file:
-                # name by cv_id to avoid collisions
-                dest_filename = f"{cv_id}{file_ext}"
-                dest_path = os.path.join(STORAGE_DIR, dest_filename)
-                shutil.copyfile(tmp_path, dest_path)
-                persisted_path = dest_path
-                # cleanup tmp
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-            else:
-                # save text as a .txt so it can be downloaded later
-                dest_filename = f"{cv_id}.txt"
-                dest_path = os.path.join(STORAGE_DIR, dest_filename)
-                with open(dest_path, "w", encoding="utf-8") as f:
-                    f.write(raw_content or extracted_text or "")
-                persisted_path = dest_path
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to persist original file: {e}")
-            persisted_path = None
-        
-        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        
-        # 3a) Raw doc (+ file_path)
-        qdrant.store_document(
-            doc_id=cv_id,
-            doc_type="cv",
-            filename=filename,
-            file_format=file_ext.lstrip("."),
-            raw_content=raw_content,
-            upload_date=_now_iso(),
-            file_path=persisted_path,          # 👈 store the path
-            mime_type=mime_type                 # 👈 store the mime
-        )
-        
-        # 3b) Structured JSON
-        qdrant.store_structured_data(
-            doc_id=cv_id,
-            doc_type="cv",
-            structured_data={
-                "document_id": cv_id,
-                "structured_info": standardized
-            }
-        )
-        
-        # 3c) EXACT embeddings
-        qdrant.store_embeddings_exact(
-            doc_id=cv_id,
-            doc_type="cv",
-            embeddings_data=doc_embeddings
-        )
-        
-        logger.info(f"✅ CV processed and stored: {cv_id}")
-        
-        return JSONResponse({
-            "status": "success",
-            "message": f"CV '{filename}' processed successfully",
-            "cv_id": cv_id,
-            "filename": filename,
-            "standardized_data": standardized,
-            "processing_stats": {
-                "text_length": len(extracted_text),
-                "skills_count": len(standardized.get("skills", [])),
-                "responsibilities_count": len(standardized.get("responsibilities", [])),
-                "embeddings_generated": 32,
-                "pii_extracted": {
-                    "emails": len(extracted_pii.get("email", [])),
-                    "phones": len(extracted_pii.get("phone", []))
-                }
-            }
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ CV upload failed: {e}")
-        raise HTTPException(status_code=500, detail=f"CV processing failed: {e}")
-
-
-@router.get("/cvs")
-async def list_cvs() -> JSONResponse:
-    """
-    List all processed CVs with metadata.
-    Reads from cv_structured (for structured_info) and cv_documents (for filename/upload_date).
-    """
-    try:
-        qdrant = get_qdrant_utils()
-
-        # Structured rows
-        all_structured = []
-        offset = None
-        while True:
-            points, next_offset = qdrant.client.scroll(
-                collection_name="cv_structured",
-                limit=200,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False
-            )
-            all_structured.extend(points)
-            if not next_offset:
-                break
-            offset = next_offset
-
-        # Documents map id -> payload
-        docs_map: Dict[str, Dict[str, Any]] = {}
-        offset = None
-        while True:
-            points, next_offset = qdrant.client.scroll(
-                collection_name="cv_documents",
-                limit=200,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False
-            )
-            for p in points:
-                payload = p.payload or {}
-                docs_map[payload.get("id") or str(p.id)] = payload
-            if not next_offset:
-                break
-            offset = next_offset
-
-        enhanced = []
-        for p in all_structured:
-            payload = p.payload or {}
-            doc_id = payload.get("id") or payload.get("document_id") or str(p.id)
-            structured = payload.get("structured_info", {})
-            doc_meta = docs_map.get(doc_id, {})
-
-            skills = structured.get("skills", [])
-            resps = structured.get("responsibilities", structured.get("responsibility_sentences", []))
-
-            enhanced.append({
-                "id": doc_id,
-                "filename": doc_meta.get("filename", "Unknown"),
-                "upload_date": doc_meta.get("upload_date", "Unknown"),
-                "full_name": structured.get("contact_info", {}).get("name") or structured.get("full_name", "Not specified"),
-                "job_title": structured.get("job_title", "Not specified"),
-                "years_of_experience": structured.get("experience_years", structured.get("years_of_experience", "Not specified")),
-                "skills_count": len(skills),
-                "skills": skills,
-                "responsibilities_count": len(resps),
-                "text_length": len(doc_meta.get("raw_content", "")),
-                "has_structured_data": True
-            })
-
-        enhanced.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
-
-        return JSONResponse({"status": "success", "count": len(enhanced), "cvs": enhanced})
-
-    except Exception as e:
-        logger.error(f"❌ Failed to list CVs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list CVs: {e}")
-
-
-@router.get("/cv/{cv_id}")
-async def get_cv_details(cv_id: str) -> JSONResponse:
-    """
-    Get details for a specific CV.
-    Combines cv_structured + cv_documents + cv_embeddings stats.
-    """
-    try:
-        qdrant = get_qdrant_utils()
-
-        # Structured data
-        s = qdrant.client.retrieve("cv_structured", ids=[cv_id], with_payload=True, with_vectors=False)
-        if not s:
-            raise HTTPException(status_code=404, detail=f"CV not found: {cv_id}")
-        structured_payload = s[0].payload or {}
-        structured = structured_payload.get("structured_info", structured_payload)
-
-        # Doc meta
-        d = qdrant.client.retrieve("cv_documents", ids=[cv_id], with_payload=True, with_vectors=False)
-        doc_meta = (d[0].payload if d else {}) or {}
-
-        # Embedding points
-        emb_points, _ = qdrant.client.scroll(
-            collection_name="cv_embeddings",
-            scroll_filter={"must": [{"key": "document_id", "match": {"value": cv_id}}]},
-            limit=100,
-            with_payload=True,
-            with_vectors=True
-        )
-        skills_count = len([p for p in emb_points if (p.payload or {}).get("vector_type") == "skill"])
-        resp_count = len([p for p in emb_points if (p.payload or {}).get("vector_type") == "responsibility"])
-        has_title = any((p.payload or {}).get("vector_type") == "job_title" for p in emb_points)
-        has_exp = any((p.payload or {}).get("vector_type") == "experience" for p in emb_points)
-        dim = 0
-        for p in emb_points:
-            if isinstance(p.vector, list):
-                dim = len(p.vector)
-                break
-
-        responsibilities = structured.get("responsibilities", structured.get("responsibility_sentences", []))
-
-        response = {
-    "id": cv_id,
-    "filename": doc_meta.get("filename", "Unknown"),
-    "upload_date": doc_meta.get("upload_date", "Unknown"),
-    "document_type": "cv",
-    "candidate": {
-        "full_name": structured.get("contact_info", {}).get("name") or structured.get("full_name", "Not specified"),
-        "job_title": structured.get("job_title", "Not specified"),
-        "years_of_experience": structured.get("experience_years", structured.get("years_of_experience", "Not specified")),
-        "skills": structured.get("skills", []),
-        "responsibilities": responsibilities,
-        "skills_count": len(structured.get("skills", [])),
-        "responsibilities_count": len(responsibilities),
-        "contact_info": structured.get("contact_info", {})  # Add this line
-    },
-    "text_info": {
-        "extracted_text_length": len(doc_meta.get("raw_content", "")),
-        "extracted_text_preview": (doc_meta.get("raw_content", "")[:500] + "...") if len(doc_meta.get("raw_content", "")) > 500 else doc_meta.get("raw_content", "")
-    },
-    "embeddings_info": {
-        "skills_embeddings": skills_count,
-        "responsibilities_embeddings": resp_count,
-        "has_title_embedding": has_title,
-        "has_experience_embedding": has_exp,
-        "embedding_dimension": dim,
-    },
-    "structured_info": structured,
-    "processing_metadata": structured.get("processing_metadata", {})
+        {/* JDs Tab */}
+        <TabsContent value="jds" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Job Descriptions</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {isLoadingJDs ? (
+                <div className="flex items-center justify-center py-8">
+                  <Clock className="w-6 h-6 animate-spin mr-2" />
+                  <span>Loading Job Descriptions...</span>
+                </div>
+              ) : filteredJDs.length === 0 ? (
+                <div className="text-center py-8">
+                  <AlertCircle className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">
+                    {searchQuery ? 'No Job Descriptions match your search' : 'No Job Descriptions uploaded'}
+                  </h3>
+                  <p className="text-gray-500 mb-4">
+                    {searchQuery 
+                      ? 'Try adjusting your search terms' 
+                      : 'Upload job descriptions to get started with matching'}
+                  </p>
+                  {!searchQuery && (
+                    <Button onClick={() => setCurrentTab('upload')}>Upload Job Descriptions</Button>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {filteredJDs.map((jd) => {
+                    const b = getJDBasics(jd);
+                    return (
+                      <div
+                        key={jd.id}
+                        className={`flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 ${
+                          selectedJD === jd.id ? 'border-blue-500 bg-blue-50' : ''
+                        }`}
+                      >
+                        <div className="flex items-center space-x-3">
+                          <input
+                            type="radio"
+                            name="selectedJD"
+                            checked={selectedJD === jd.id}
+                            onChange={() => selectJD(jd.id)}
+                            className="h-4 w-4 text-blue-600"
+                          />
+                          <div className="p-2 bg-green-100 rounded-lg">
+                            <FileText className="w-5 h-5 text-green-600" />
+                          </div>
+                          <div>
+                            <h4 className="font-medium text-gray-900">{b.title}</h4>
+                            <p className="text-sm text-gray-500">{b.years} experience required</p>
+                            <div className="flex items-center space-x-2 mt-1">
+                              <Badge variant="secondary">{b.skillsCount} skills</Badge>
+                              <Badge variant="outline">{b.responsibilitiesCount} responsibilities</Badge>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setSelectedJDForDetails(jd.id)}
+                              >
+                                <Eye className="w-4 h-4" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto bg-white rounded-lg shadow-xl">
+                              <DialogHeader className="flex flex-row items-center justify-between">
+                                <DialogTitle className="text-xl font-semibold">Job Description Details</DialogTitle>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setSelectedJDForDetails(null)}
+                                  className="h-6 w-6 rounded-full hover:bg-gray-100"
+                                >
+                                  <X className="h-4 w-4" />
+                                </Button>
+                              </DialogHeader>
+                              <JDDetails jdId={jd.id} />
+                            </DialogContent>
+                          </Dialog>
+                          <Button variant="ghost" size="sm" onClick={() => handleReprocessJD(jd.id)} disabled={isDeleting}>
+                            <RefreshCw className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDeleteJD(jd.id)}
+                            disabled={isDeleting}
+                            className="text-red-500 hover:text-red-700"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
 }
 
-        return JSONResponse({"status": "success", "cv": response})
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to get CV details: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get CV details: {e}")
-
-
-@router.delete("/cv/{cv_id}")
-async def delete_cv(cv_id: str) -> JSONResponse:
-    """
-    Delete a CV and all associated data across:
-      - cv_documents
-      - cv_structured
-      - cv_embeddings (all vectors with document_id == cv_id)
-    """
-    try:
-        qdrant = get_qdrant_utils()
-
-        # Check existence
-        s = qdrant.client.retrieve("cv_structured", ids=[cv_id], with_payload=True)
-        if not s:
-            raise HTTPException(status_code=404, detail=f"CV not found: {cv_id}")
-        filename = (qdrant.client.retrieve("cv_documents", ids=[cv_id], with_payload=True) or [{}])[0].payload.get("filename", cv_id)
-
-        # Delete embedding points
-        emb_points, _ = qdrant.client.scroll(
-            collection_name="cv_embeddings",
-            scroll_filter={"must": [{"key": "document_id", "match": {"value": cv_id}}]},
-            limit=1000,
-            with_payload=False,
-            with_vectors=False
-        )
-        emb_ids = [str(p.id) for p in emb_points]
-        if emb_ids:
-            qdrant.client.delete(collection_name="cv_embeddings", points_selector=emb_ids)
-
-        # Delete structured + document
-        qdrant.client.delete(collection_name="cv_structured", points_selector=[cv_id])
-        qdrant.client.delete(collection_name="cv_documents", points_selector=[cv_id])
-
-        return JSONResponse({
-            "status": "success",
-            "message": f"CV '{filename}' deleted successfully",
-            "deleted_cv_id": cv_id
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to delete CV: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete CV: {e}")
-
-
-@router.post("/cv/{cv_id}/reprocess")
-async def reprocess_cv(cv_id: str) -> JSONResponse:
-    """
-    Reprocess an existing CV with updated prompts/embeddings.
-    """
-    try:
-        qdrant = get_qdrant_utils()
-
-        # Get original raw content
-        doc = qdrant.client.retrieve("cv_documents", ids=[cv_id], with_payload=True)
-        if not doc:
-            raise HTTPException(status_code=404, detail=f"CV not found: {cv_id}")
-        filename = doc[0].payload.get("filename", "reprocessed_cv.txt")
-        raw_content = doc[0].payload.get("raw_content", "")
-
-        if not raw_content:
-            raise HTTPException(status_code=400, detail="No stored raw content to reprocess")
-
-        # Standardize again
-        llm = get_llm_service()
-        standardized = llm.standardize_cv(raw_content, filename)
-
-        # New embeddings (32)
-        emb_service = get_embedding_service()
-        doc_embeddings = emb_service.generate_document_embeddings(standardized)
-
-        # Replace structured
-        qdrant.store_structured_data(cv_id, "cv", {
-            "document_id": cv_id,
-            "structured_info": standardized
-        })
-
-        # Remove old embeddings and store new ones
-        emb_points, _ = qdrant.client.scroll(
-            collection_name="cv_embeddings",
-            scroll_filter={"must": [{"key": "document_id", "match": {"value": cv_id}}]},
-            limit=2000,
-            with_payload=False,
-            with_vectors=False
-        )
-        old_ids = [str(p.id) for p in emb_points]
-        if old_ids:
-            qdrant.client.delete(collection_name="cv_embeddings", points_selector=old_ids)
-
-        qdrant.store_embeddings_exact(cv_id, "cv", doc_embeddings)
-
-        return JSONResponse({
-            "status": "success",
-            "message": f"CV '{filename}' reprocessed successfully",
-            "cv_id": cv_id,
-            "updated_data": standardized,
-            "processing_stats": {
-                "skills_count": len(standardized.get("skills", [])),
-                "responsibilities_count": len(standardized.get("responsibilities", [])),
-                "embeddings_generated": 32
-            }
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ CV reprocessing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"CV reprocessing failed: {e}")
-
-
-@router.get("/cv/{cv_id}/embeddings")
-async def get_cv_embeddings_info(cv_id: str) -> JSONResponse:
-    """
-    Get detailed embeddings information for a CV from cv_embeddings.
-    """
-    try:
-        qdrant = get_qdrant_utils()
-
-        # Verify CV exists
-        s = qdrant.client.retrieve("cv_structured", ids=[cv_id], with_payload=True)
-        if not s:
-            raise HTTPException(status_code=404, detail=f"CV not found: {cv_id}")
-
-        # Pull embedding points
-        points, _ = qdrant.client.scroll(
-            collection_name="cv_embeddings",
-            scroll_filter={"must": [{"key": "document_id", "match": {"value": cv_id}}]},
-            limit=2000,
-            with_payload=True,
-            with_vectors=True
-        )
-
-        info = {
-            "cv_id": cv_id,
-            "embeddings_found": bool(points),
-            "skills": {"count": 0, "embedding_dimension": 0},
-            "responsibilities": {"count": 0, "embedding_dimension": 0},
-            "title_embedding": False,
-            "experience_embedding": False,
-            "total_embeddings": 0
-        }
-
-        for p in points:
-            pld = p.payload or {}
-            vtype = pld.get("vector_type")
-            if vtype == "skill":
-                info["skills"]["count"] += 1
-                if isinstance(p.vector, list) and not info["skills"]["embedding_dimension"]:
-                    info["skills"]["embedding_dimension"] = len(p.vector)
-            elif vtype == "responsibility":
-                info["responsibilities"]["count"] += 1
-                if isinstance(p.vector, list) and not info["responsibilities"]["embedding_dimension"]:
-                    info["responsibilities"]["embedding_dimension"] = len(p.vector)
-            elif vtype == "job_title":
-                info["title_embedding"] = True
-            elif vtype == "experience":
-                info["experience_embedding"] = True
-
-        info["total_embeddings"] = info["skills"]["count"] + info["responsibilities"]["count"] + int(info["title_embedding"]) + int(info["experience_embedding"])
-
-        return JSONResponse({"status": "success", "embeddings_info": info})
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to get CV embeddings info: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get CV embeddings info: {e}")
-
-
-@router.post("/standardize-cv")
-async def standardize_cv_text(request: StandardizeCVRequest) -> JSONResponse:
-    try:
-        if not request.cv_text or not request.cv_text.strip():
-            raise HTTPException(status_code=400, detail="CV text cannot be empty")
-        if len(request.cv_text) > 50000:
-            raise HTTPException(status_code=400, detail="CV text too long (max 50KB)")
+/* ---------------------------- CV Details (modal) --------------------------- */
+function CVDetails({ cvId }: { cvId: string }) {
+  const [cv, setCV] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  
+  useEffect(() => {
+    const loadCV = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await api.getCVDetails(cvId);
+        const cvData = response;
+        setCV(cvData);
+      } catch (err: any) {
+        setError(err.message || 'Failed to load CV details');
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadCV();
+  }, [cvId]);
+  
+  if (loading) return <div className="flex items-center justify-center py-8">Loading CV details...</div>;
+  if (error)
+    return (
+      <div className="text-center py-8">
+        <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-4" />
+        <h3 className="text-lg font-medium text-red-900 mb-2">Error Loading CV</h3>
+        <p className="text-red-500 mb-4">{error}</p>
+      </div>
+    );
+  if (!cv) return <div className="text-center py-8">CV not found</div>;
+  
+  const b = getCVBasics(cv);
+  
+  return (
+    <div className="space-y-4">
+      {/* Candidate Info */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <h3 className="text-lg font-semibold mb-3">Candidate Information</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <h4 className="text-sm font-medium text-gray-500">Full Name</h4>
+            <p className="text-base font-semibold">{b.name}</p>
+          </div>
+          <div>
+            <h4 className="text-sm font-medium text-gray-500">Job Title</h4>
+            <p className="text-base font-semibold">{b.title}</p>
+          </div>
+          <div>
+            <h4 className="text-sm font-medium text-gray-500">Experience</h4>
+            <p className="text-base font-semibold">{b.years} years</p>
+          </div>
+          <div>
+            <h4 className="text-sm font-medium text-gray-500">Upload Date</h4>
+            <p className="text-base font-semibold">{formatDate(cv?.cv?.upload_date || cv?.upload_date)}</p>
+          </div>
+        </div>
         
-        # Extract PII before sending to LLM
-        parsing_service = get_parsing_service()
-        clean_text, extracted_pii = parsing_service.remove_pii_data(request.cv_text.strip())
-        
-        # Send clean text to LLM
-        llm = get_llm_service()
-        standardized = llm.standardize_cv(clean_text, request.cv_filename)
-        
-        # Add extracted PII to standardized data
-        standardized["extracted_pii"] = extracted_pii
-        
-        # Override contact_info with extracted PII
-        if "contact_info" not in standardized:
-            standardized["contact_info"] = {}
-        if extracted_pii.get("email") and len(extracted_pii["email"]) > 0:
-            standardized["contact_info"]["email"] = extracted_pii["email"][0]
-        if extracted_pii.get("phone") and len(extracted_pii["phone"]) > 0:
-            standardized["contact_info"]["phone"] = extracted_pii["phone"][0]
-        
-        # Generate embeddings for stats
-        emb_service = get_embedding_service()
-        doc_embeddings = emb_service.generate_document_embeddings(standardized)
-        dims = len(doc_embeddings["skill_vectors"][0]) if doc_embeddings["skill_vectors"] else 0
-        
-        return JSONResponse({
-            "status": "success",
-            "message": f"CV '{request.cv_filename}' standardized successfully",
-            "filename": request.cv_filename,
-            "standardized_data": standardized,
-            "processing_stats": {
-                "input_text_length": len(request.cv_text),
-                "skills_count": len(standardized.get("skills", [])),
-                "responsibilities_count": len(standardized.get("responsibilities", [])),
-                "embeddings_info": {
-                    "skills_count": len(doc_embeddings["skill_vectors"]),
-                    "responsibilities_count": len(doc_embeddings["responsibility_vectors"]),
-                    "vector_dimension": dims
-                },
-                "pii_extracted": {
-                    "emails": len(extracted_pii.get("email", [])),
-                    "phones": len(extracted_pii.get("phone", []))
-                }
-            }
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ CV text standardization failed: {e}")
-        raise HTTPException(status_code=500, detail=f"CV standardization failed: {e}")
-@router.get("/cv/{cv_id}/download")
-async def download_cv(cv_id: str):
-    """
-    Download the original uploaded CV file.
-    Falls back to a .txt export of raw_content if the file_path is missing.
-    """
-    q = get_qdrant_utils().client
-    res = q.retrieve("cv_documents", ids=[cv_id], with_payload=True, with_vectors=False)
-    if not res:
-        raise HTTPException(status_code=404, detail="CV not found")
+        {/* Contact Information */}
+<div className="mt-4">
+  <h4 className="text-sm font-medium text-gray-500 mb-2">Contact Information</h4>
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div>
+      <p className="text-sm text-gray-600">Email</p>
+      <p className="font-medium text-blue-600">
+        {(() => {
+          // Try multiple paths to find the email
+          const email = cv?.cv?.candidate?.contact_info?.email || 
+                        cv?.cv?.structured_info?.contact_info?.email ||
+                        cv?.candidate?.contact_info?.email ||
+                        cv?.structured_info?.contact_info?.email;
+          
+          // If not found in structured data, try to extract from text preview
+          if (!email) {
+            const textPreview = cv?.cv?.text_info?.extracted_text_preview || 
+                               cv?.text_info?.extracted_text_preview || 
+                               cv?.extracted_text_preview || '';
+            
+            // Extract email using regex
+            const emailMatch = textPreview.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
+            return emailMatch ? emailMatch[0] : 'not provided';
+          }
+          
+          return email || 'not provided';
+        })()}
+      </p>
+    </div>
+    <div>
+      <p className="text-sm text-gray-600">Phone</p>
+      <p className="font-medium text-blue-600">
+        {(() => {
+          // Try multiple paths to find the phone
+          const phone = cv?.cv?.candidate?.contact_info?.phone || 
+                        cv?.cv?.structured_info?.contact_info?.phone ||
+                        cv?.candidate?.contact_info?.phone ||
+                        cv?.structured_info?.contact_info?.phone;
+          
+          // If not found in structured data, try to extract from text preview
+          if (!phone) {
+            const textPreview = cv?.cv?.text_info?.extracted_text_preview || 
+                               cv?.text_info?.extracted_text_preview || 
+                               cv?.extracted_text_preview || '';
+            
+            // Extract phone using regex
+            const phoneMatch = textPreview.match(/(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+            return phoneMatch ? phoneMatch[0] : 'not provided';
+          }
+          
+          return phone || 'not provided';
+        })()}
+      </p>
+    </div>
+  </div>
+</div>
+      </div>
+      
+      {/* Skills */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Skills</h3>
+          <Badge className="ml-2">{b.skillsCount}</Badge>
+        </div>
+        {(() => {
+  const cvData = cv?.cv || cv;
+  const candidate = cvData?.candidate || {};
+  const structured = cvData?.structured_info || {};
+  const responsibilities =
+    candidate?.responsibilities ??
+    structured?.responsibilities ??
+    structured?.responsibility_sentences ??
+    cvData?.responsibilities ??
+    [];
+  return responsibilities.length ? (
+    <ul className="space-y-2">
+      {responsibilities.map((resp: string, i: number) => (
+        <li key={i} className="text-gray-700">{resp}</li>
+      ))}
+    </ul>
+  ) : (
+    <p className="text-gray-500">No responsibilities available</p>
+  );
+})()}
 
-    payload = res[0].payload or {}
-    filepath = payload.get("file_path") or payload.get("filepath")
-    filename = payload.get("filename", f"{cv_id}.dat")
+      </div>
+      
+      {/* Responsibilities */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Responsibilities</h3>
+          <Badge className="ml-2">{b.respCount}</Badge>
+        </div>
+        {(() => {
+          const responsibilities = cv?.cv?.candidate?.responsibilities || cv?.candidate?.responsibilities || cv?.cv?.responsibilities || cv?.responsibilities || [];
+          return responsibilities.length ? (
+            <ul className="space-y-2">
+              {responsibilities.map((resp: string, i: number) => (
+                <li key={i} className="text-gray-700">{resp}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-gray-500">No responsibilities information available</p>
+          );
+        })()}
+      </div>
+      
+      {/* Text Preview */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <h3 className="text-lg font-semibold mb-3">Text Preview</h3>
+        <div className="bg-gray-50 p-3 rounded max-h-40 overflow-y-auto">
+          <p className="text-sm text-gray-700 whitespace-pre-line">
+            {cv?.cv?.text_info?.extracted_text_preview || cv?.text_info?.extracted_text_preview || cv?.extracted_text_preview || 'No text preview available'}
+          </p>
+        </div>
+        <div className="mt-2 text-sm text-gray-500">
+          Text length: {cv?.cv?.text_info?.extracted_text_length || cv?.text_info?.extracted_text_length || cv?.extracted_text_length || 0} characters
+        </div>
+      </div>
+      
+      {/* Processing / Embeddings */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+          <h3 className="text-lg font-semibold mb-3">Embeddings Information</h3>
+          <div className="space-y-2">
+            <Row label="Skills Embeddings" value={cv?.cv?.embeddings_info?.skills_embeddings || cv?.embeddings_info?.skills_embeddings || cv?.skills_embeddings || 0} />
+            <Row label="Responsibilities Embeddings" value={cv?.cv?.embeddings_info?.responsibilities_embeddings || cv?.embeddings_info?.responsibilities_embeddings || cv?.responsibilities_embeddings || 0} />
+            <Row label="Title Embedding" value={(cv?.cv?.embeddings_info?.has_title_embedding || cv?.embeddings_info?.has_title_embedding || cv?.has_title_embedding) ? 'Yes' : 'No'} />
+            <Row label="Experience Embedding" value={(cv?.cv?.embeddings_info?.has_experience_embedding || cv?.embeddings_info?.has_experience_embedding || cv?.has_experience_embedding) ? 'Yes' : 'No'} />
+            <Row label="Embedding Dimension" value={cv?.cv?.embeddings_info?.embedding_dimension || cv?.embeddings_info?.embedding_dimension || cv?.embedding_dimension || 'N/A'} />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+          <h3 className="text-lg font-semibold mb-3">Processing Information</h3>
+          <div className="space-y-2">
+            <Row label="Filename" value={cv?.cv?.processing_metadata?.filename || cv?.processing_metadata?.filename || cv?.cv?.filename || cv?.filename || 'N/A'} mono />
+            <Row label="Model Used" value={cv?.cv?.processing_metadata?.model_used || cv?.processing_metadata?.model_used || cv?.model_used || 'N/A'} />
+            <Row
+              label="Processing Time"
+              value={
+                cv?.cv?.processing_metadata?.processing_time || cv?.processing_metadata?.processing_time || cv?.processing_time
+                  ? `${(
+                      (cv?.cv?.processing_metadata?.processing_time ??
+                        cv?.processing_metadata?.processing_time ??
+                        cv?.processing_time) as number
+                    ).toFixed(2)}s`
+                  : 'N/A'
+              }
+            />
+            <Row label="Text Length" value={cv?.cv?.processing_metadata?.text_length || cv?.cv?.text_info?.extracted_text_length || cv?.processing_metadata?.text_length || cv?.text_info?.extracted_text_length || cv?.text_length || 0} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-    # Serve the persisted file if we have it
-    if filepath and os.path.exists(filepath):
-        guessed = mimetypes.guess_type(filepath)[0] or payload.get("mime_type") or "application/octet-stream"
-        return FileResponse(filepath, media_type=guessed, filename=os.path.basename(filepath))
+/* ---------------------------- JD Details (modal) --------------------------- */
+function JDDetails({ jdId }: { jdId: string }) {
+  const [jd, setJD] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showJSON, setShowJSON] = useState(false);
+  
+  useEffect(() => {
+    const loadJD = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await api.getJDDetails(jdId);
+        // accept several shapes
+        const jdData = response;
+        setJD(jdData);
+      } catch (err: any) {
+        setError(err.message || 'Failed to load JD details');
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadJD();
+  }, [jdId]);
+  
+  if (loading) return <div className="flex items-center justify-center py-8">Loading JD details...</div>;
+  if (error)
+    return (
+      <div className="text-center py-8">
+        <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-4" />
+        <h3 className="text-lg font-medium text-red-900 mb-2">Error Loading Job Description</h3>
+        <p className="text-red-500 mb-4">{error}</p>
+      </div>
+    );
+  if (!jd) return <div className="text-center py-8">Job Description not found</div>;
+  
+  const b = getJDBasics(jd);
+  
+  return (
+    <div className="space-y-4">
+      {/* Job Info */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <h3 className="text-lg font-semibold mb-3">Job Information</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Row label="Job Title" value={b.title} />
+          <Row label="Experience Required" value={`${b.years} years`} />
+          <Row label="Upload Date" value={formatDate(jd?.jd?.upload_date || jd?.upload_date)} />
+          <Row label="Document Type" value={jd?.jd?.document_type || jd?.document_type || 'jd'} />
+        </div>
+      </div>
+      
+      {/* Required Skills */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Required Skills</h3>
+          <Badge className="ml-2">{b.skillsCount}</Badge>
+        </div>
+        {b.skillsCount > 0 ? (
+          <ul className="space-y-2">
+            {b.skills.map((s: string, i: number) => (
+              <li key={i} className="text-gray-700">{s}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500">No skills information available</p>
+        )}
+      </div>
+      
+      {/* Responsibilities */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Responsibilities</h3>
+          <Badge className="ml-2">{b.responsibilitiesCount}</Badge>
+        </div>
+        {b.responsibilitiesCount > 0 ? (
+          <ul className="space-y-2">
+            {b.responsibilities.map((r: string, i: number) => (
+              <li key={i} className="text-gray-700">{r}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500">No responsibilities information available</p>
+        )}
+      </div>
+      
+      {/* Text Preview */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+        <h3 className="text-lg font-semibold mb-3">Text Preview</h3>
+        <div className="bg-gray-50 p-3 rounded max-h-40 overflow-y-auto">
+          <p className="text-sm text-gray-700 whitespace-pre-line">
+            {jd?.jd?.text_info?.extracted_text_preview || jd?.text_info?.extracted_text_preview || jd?.extracted_text_preview || 'No text preview available'}
+          </p>
+        </div>
+        <div className="mt-2 text-sm text-gray-500">
+          Text length: {jd?.jd?.text_info?.extracted_text_length || jd?.text_info?.extracted_text_length || jd?.extracted_text_length || 0} characters
+        </div>
+      </div>
+      
+      {/* Processing / Embeddings */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+          <h3 className="text-lg font-semibold mb-3">Embeddings Information</h3>
+          <div className="space-y-2">
+            <Row label="Skills Embeddings" value={jd?.jd?.embeddings_info?.skills_embeddings || jd?.embeddings_info?.skills_embeddings || jd?.skills_embeddings || 0} />
+            <Row
+              label="Responsibilities Embeddings"
+              value={jd?.jd?.embeddings_info?.responsibilities_embeddings || jd?.embeddings_info?.responsibilities_embeddings || jd?.responsibilities_embeddings || 0}
+            />
+            <Row
+              label="Title Embedding"
+              value={(jd?.jd?.embeddings_info?.has_title_embedding || jd?.embeddings_info?.has_title_embedding || jd?.has_title_embedding) ? 'Yes' : 'No'}
+            />
+            <Row
+              label="Experience Embedding"
+              value={(jd?.jd?.embeddings_info?.has_experience_embedding || jd?.embeddings_info?.has_experience_embedding || jd?.has_experience_embedding) ? 'Yes' : 'No'}
+            />
+            <Row label="Embedding Dimension" value={jd?.jd?.embeddings_info?.embedding_dimension || jd?.embeddings_info?.embedding_dimension || jd?.embedding_dimension || 'N/A'} />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
+          <h3 className="text-lg font-semibold mb-3">Processing Information</h3>
+          <div className="space-y-2">
+            <Row label="Filename" value={jd?.jd?.processing_metadata?.filename || jd?.processing_metadata?.filename || jd?.jd?.filename || jd?.filename || 'N/A'} mono />
+            <Row label="Model Used" value={jd?.jd?.processing_metadata?.model_used || jd?.processing_metadata?.model_used || jd?.model_used || 'N/A'} />
+            <Row
+              label="Processing Time"
+              value={
+                jd?.jd?.processing_metadata?.processing_time || jd?.processing_metadata?.processing_time || jd?.processing_time
+                  ? `${(
+                      (jd?.jd?.processing_metadata?.processing_time ??
+                        jd?.processing_metadata?.processing_time ??
+                        jd?.processing_time) as number
+                    ).toFixed(2)}s`
+                  : 'N/A'
+              }
+            />
+            <Row label="Text Length" value={jd?.jd?.processing_metadata?.text_length || jd?.jd?.text_info?.extracted_text_length || jd?.processing_metadata?.text_length || jd?.text_info?.extracted_text_length || jd?.text_length || 0} />
+          </div>
+        </div>
+      </div>
+      
+      {/* Optional: collapsible raw JSON for debugging */}
+      <div className="mt-2">
+        <button
+          className="inline-flex items-center text-xs text-gray-500 hover:text-gray-700"
+          onClick={() => setShowJSON((s) => !s)}
+        >
+          <ChevronDown className={`w-4 h-4 mr-1 transition-transform ${showJSON ? 'rotate-180' : ''}`} />
+          {showJSON ? 'Hide raw JSON' : 'Show raw JSON'}
+        </button>
+        {showJSON && (
+          <pre className="mt-2 text-xs bg-gray-50 p-3 rounded border max-h-60 overflow-auto">
+            {JSON.stringify(jd, null, 2)}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
 
-    # Fallback: stream raw_content as a .txt download (helps older records)
-    raw = payload.get("raw_content")
-    if raw:
-        bytes_io = BytesIO(raw.encode("utf-8"))
-        headers = {
-            "Content-Disposition": f'attachment; filename="{os.path.splitext(filename)[0]}.txt"'
-        }
-        return StreamingResponse(bytes_io, media_type="text/plain; charset=utf-8", headers=headers)
-
-    raise HTTPException(status_code=404, detail="File not found on server")
+/* --------------------------------- Helpers -------------------------------- */
+function Row({ label, value, mono = false }: { label: string; value: any; mono?: boolean }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-gray-600">{label}:</span>
+      <span className={`font-medium ${mono ? 'font-mono text-xs truncate max-w-[220px]' : ''}`}>
+        {String(value ?? 'N/A')}
+      </span>
+    </div>
+  );
+}
