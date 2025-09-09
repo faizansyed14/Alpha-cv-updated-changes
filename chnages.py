@@ -1,449 +1,240 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
-import { v4 as uuidv4 } from 'uuid';
-import { config } from './config';
-import { logger } from './logger';
-import { ApiErrorHandler, RequestRetryHandler } from './error-handler';
-import {
-  MatchRequest,
-  MatchResponse,
-  CVListResponse,
-  JDListResponse,
-  HealthResponse,
-  UploadResponse,
-  StandardizeResponse,
-  DatabaseStatusResponse,
-  SystemStatsResponse,
-  EmbeddingsInfoResponse,
-  CVDataResponse,
-  JDDataResponse,
-  DatabaseViewResponse,
-  LoginRequest,
-  LoginResponse,
-  UserProfile,
-  AdminUser,
-  CreateUserRequest,
-  UpdateUserRequest,
-  JobPostingResponse,
-  JobPostingListItem,
+import { create } from 'zustand';
+import { api } from '@/lib/api';
+import { 
+  JobPostingResponse, 
+  JobPostingListItem, 
+  JobApplicationListItem,
   PublicJobView,
-  JobApplicationResponse,
-  JobApplicationListItem
-} from './types';
+  JobApplicationResponse
+} from '@/lib/types';
+import { logger } from '@/lib/logger';
 
-class ApiClient {
-  private client: AxiosInstance;
+interface CareersState {
+  // Job postings
+  jobPostings: JobPostingListItem[];
+  selectedJob: JobPostingListItem | null;
   
-  constructor() {
-    this.client = axios.create({
-      baseURL: config.apiUrl,
-      timeout: config.requestTimeout,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    // Request interceptor - add request ID
-    this.client.interceptors.request.use((config) => {
-      const requestId = uuidv4();
-      config.headers['x-request-id'] = requestId;
-      
-      logger.info(`API Request: ${config.method?.toUpperCase()} ${config.url}`, {
-        requestId,
-        data: config.data,
-      });
-      return config;
-    });
-
-    // Response interceptor - log responses and handle errors
-    this.client.interceptors.response.use(
-      (response) => {
-        const requestId = response.config.headers['x-request-id'] as string;
-        logger.info(`API Response: ${response.status}`, {
-          requestId,
-          url: response.config.url,
-          status: response.status,
-        });
-        return response;
-      },
-      (error) => {
-        const requestId = error.config?.headers?.['x-request-id'] as string;
-        throw ApiErrorHandler.handle(error, requestId);
-      }
-    );
-  }
-
-  // Health endpoints
-  async healthCheck(): Promise<HealthResponse> {
-    const response = await this.client.get<HealthResponse>('/api/health');
-    return response.data;
-  }
-
-  // CV endpoints
-  async uploadCV(file: File, cvText?: string): Promise<UploadResponse> {
-    const formData = new FormData();
-    
-    if (file) {
-      formData.append('file', file);
-    } else if (cvText) {
-      formData.append('cv_text', cvText);
-    }
-    
-    const response = await this.client.post<UploadResponse>('/api/cv/upload-cv', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
-    return response.data;
-  }
-
-  async listCVs(): Promise<CVListResponse> {
-    const response = await this.client.get<CVListResponse>('/api/cv/cvs');
-    return response.data;
-  }
-
-  async getCVDetails(cvId: string): Promise<CVDataResponse> {
-    const response = await this.client.get<CVDataResponse>(`/api/cv/cv/${cvId}`);
-    return response.data;
-  }
-
-  async deleteCV(cvId: string): Promise<{ success: boolean; message: string }> {
-    const response = await this.client.delete<{ success: boolean; message: string }>(`/api/cv/cv/${cvId}`);
-    return response.data;
-  }
-
-  async reprocessCV(cvId: string): Promise<UploadResponse> {
-    const response = await this.client.post<UploadResponse>(`/api/cv/cv/${cvId}/reprocess`);
-    return response.data;
-  }
-
-  async getCVEmbeddings(cvId: string): Promise<EmbeddingsInfoResponse> {
-    const response = await this.client.get<EmbeddingsInfoResponse>(`/api/cv/cv/${cvId}/embeddings`);
-    return response.data;
-  }
-
-  async standardizeCV(cvText: string, filename?: string): Promise<StandardizeResponse> {
-    const payload: { cv_text: string; cv_filename?: string } = { cv_text: cvText };
-    if (filename) payload.cv_filename = filename;
-    
-    const response = await this.client.post<StandardizeResponse>('/api/cv/standardize-cv', payload);
-    return response.data;
-  }
-
-  // JD endpoints
-  async uploadJD(file: File, jdText?: string): Promise<UploadResponse> {
-    const formData = new FormData();
-    
-    if (file) {
-      formData.append('file', file);
-    } else if (jdText) {
-      formData.append('jd_text', jdText);
-    }
-    
-    const response = await this.client.post<UploadResponse>('/api/jd/upload-jd', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
-    return response.data;
-  }
-
-  async listJDs(): Promise<JDListResponse> {
-    const response = await this.client.get<JDListResponse>('/api/jd/jds');
-    return response.data;
-  }
-
-  async getJDDetails(jdId: string): Promise<JDDataResponse> {
-    const response = await this.client.get<JDDataResponse>(`/api/jd/jd/${jdId}`);
-    return response.data;
-  }
-
-  async deleteJD(jdId: string): Promise<{ success: boolean; message: string }> {
-    const response = await this.client.delete<{ success: boolean; message: string }>(`/api/jd/jd/${jdId}`);
-    return response.data;
-  }
-
-  async reprocessJD(jdId: string): Promise<UploadResponse> {
-    const response = await this.client.post<UploadResponse>(`/api/jd/jd/${jdId}/reprocess`);
-    return response.data;
-  }
-
-  async getJDEmbeddings(jdId: string): Promise<EmbeddingsInfoResponse> {
-    const response = await this.client.get<EmbeddingsInfoResponse>(`/api/jd/jd/${jdId}/embeddings`);
-    return response.data;
-  }
-
-  async standardizeJD(jdText: string, filename?: string): Promise<StandardizeResponse> {
-    const payload: { jd_text: string; jd_filename?: string } = { jd_text: jdText };
-    if (filename) payload.jd_filename = filename;
-    
-    const response = await this.client.post<StandardizeResponse>('/api/jd/standardize-jd', payload);
-    return response.data;
-  }
-
-  // Matching endpoints
-  async matchCandidates(request: MatchRequest): Promise<MatchResponse> {
-    const response = await this.client.post<MatchResponse>('/api/match', request);
-    return response.data;
-  }
-
-  async matchText(jdText: string, cvText: string): Promise<any> {
-    const response = await this.client.post('/api/match-text', {
-      jd_text: jdText,
-      cv_text: cvText
-    });
-    return response.data;
-  }
-
-  // System endpoints
-  async getSystemStats(): Promise<SystemStatsResponse> {
-    const response = await this.client.get<SystemStatsResponse>('/api/system-stats');
-    return response.data;
-  }
-
-  async getDatabaseStatus(): Promise<DatabaseStatusResponse> {
-    const response = await this.client.get<DatabaseStatusResponse>('/api/database/status');
-    return response.data;
-  }
-
-  async getDatabaseView(): Promise<DatabaseViewResponse> {
-    const response = await this.client.get<DatabaseViewResponse>('/api/database/view');
-    return response.data;
-  }
-
-  // Clear database
-async clearDatabase(confirm: boolean): Promise<{ status: string; message: string }> {
-  const response = await this.client.post<{ status: string; message: string }>('/api/clear-database', null, {
-    params: { confirm }
-  });
-  return response.data;
+  // Applications
+  applications: JobApplicationListItem[];
+  
+  // Public job viewing
+  publicJob: PublicJobView | null;
+  
+  // Loading states
+  isLoading: boolean;
+  isCreatingJob: boolean;
+  isSubmittingApplication: boolean;
+  isUpdatingStatus: boolean;
+  
+  // Error handling
+  error: string | null;
 }
 
-
-// Download CV by ID
-async downloadCV(cvId: string): Promise<Blob> {
-  const response = await this.client.get(`/api/cv/cv/${cvId}/download`, {
-    responseType: 'blob',
-  });
-  return response.data;
-}
-
-  // Auth methods
-  async login(username: string, password: string): Promise<LoginResponse> {
-    const response = await this.client.post<LoginResponse>('/api/auth/login', {
-      username,
-      password,
-    });
-    return response.data;
-  }
-
-  async me(token: string): Promise<UserProfile> {
-    const response = await this.client.get<UserProfile>('/api/auth/me', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    return response.data;
-  }
-
-  // Admin methods
-  async listUsers(token: string): Promise<AdminUser[]> {
-    const response = await this.client.get<AdminUser[]>('/api/admin/users', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    return response.data;
-  }
-
-  async createUser(token: string, body: CreateUserRequest): Promise<AdminUser> {
-    const response = await this.client.post<AdminUser>('/api/admin/users', body, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    return response.data;
-  }
-
-  async updateUser(token: string, id: string, body: UpdateUserRequest): Promise<AdminUser> {
-    const response = await this.client.patch<AdminUser>(`/api/admin/users/${id}`, body, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-    return response.data;
-  }
-
-  async deleteUser(token: string, id: string): Promise<void> {
-    await this.client.delete(`/api/admin/users/${id}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-  }
-
-  // Careers methods
-  async createJobPosting(file: File): Promise<JobPostingResponse> {
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    const response = await this.client.post<JobPostingResponse>(
-      '/api/careers/admin/jobs/post', 
-      formData,
-      {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-        },
-      }
-    );
-    return response.data;
-  }
-
-  async listJobPostings(includeInactive: boolean = false): Promise<JobPostingListItem[]> {
-  const response = await this.client.get<JobPostingListItem[]>(
-    '/api/careers/admin/jobs',
-    {
-      headers: {
-        'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-      },
-      params: {
-        include_inactive: includeInactive
-      }
-    }
-  );
-  return response.data;
-}
-
-// lib/api.ts
-
-async getPublicJob(token: string): Promise<PublicJobView> {
-  try {
-    const response = await this.client.get<PublicJobView>(`/api/careers/jobs/${token}`);
-    return response.data;
-  } catch (error: any) {
-    logger.error('Failed to get public job:', error);
-    
-    // If it's a 404 error, throw a more specific error
-    if (error.response?.status === 404) {
-      throw new Error('Job not found or no longer available');
-    }
-    
-    // Re-throw the original error
-    throw error;
-  }
-}
-
-  async submitJobApplication(
+interface CareersActions {
+  // Job posting management
+  createJobPosting: (file: File) => Promise<JobPostingResponse | null>;
+  loadJobPostings: () => Promise<void>;
+  selectJob: (job: JobPostingListItem) => void;
+  updateJobStatus: (jobId: string, isActive: boolean) => Promise<boolean>;
+  
+  // Application management
+  loadJobApplications: (jobId: string) => Promise<void>;
+  
+  // Public actions (no auth required)
+  loadPublicJob: (token: string) => Promise<void>;
+  submitApplication: (
     token: string, 
-    applicantName: string,
-    applicantEmail: string, 
-    applicantPhone: string | undefined,
+    name: string, 
+    email: string, 
+    phone: string | undefined, 
     cvFile: File
-  ): Promise<JobApplicationResponse> {
-    const formData = new FormData();
-    formData.append('applicant_name', applicantName);
-    formData.append('applicant_email', applicantEmail);
-    if (applicantPhone) formData.append('applicant_phone', applicantPhone);
-    formData.append('cv_file', cvFile);
-    
-    const response = await this.client.post<JobApplicationResponse>(
-      `/api/careers/jobs/${token}/apply`, 
-      formData,
-      {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      }
-    );
-    return response.data;
-  }
+  ) => Promise<JobApplicationResponse | null>;
+  
+  // Utilities
+  clearError: () => void;
+  reset: () => void;
+}
 
-  async getJobApplications(jobId: string): Promise<JobApplicationListItem[]> {
-    const response = await this.client.get<JobApplicationListItem[]>(
-      `/api/careers/admin/jobs/${jobId}/applications`,
-      {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`
-        }
-      }
-    );
-    return response.data;
-  }
-  async updateJobStatus(jobId: string, status: { is_active: boolean }): Promise<{ success: boolean; message: string }> {
-  const response = await this.client.patch<{ success: boolean; message: string }>(
-    `/api/careers/admin/jobs/${jobId}/status`,
-    status,
-    {
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem('auth_token')}`
-      }
+type CareersStore = CareersState & CareersActions;
+
+export const useCareersStore = create<CareersStore>((set, get) => ({
+  // Initial state
+  jobPostings: [],
+  selectedJob: null,
+  applications: [],
+  publicJob: null,
+  isLoading: false,
+  isCreatingJob: false,
+  isSubmittingApplication: false,
+  isUpdatingStatus: false,
+  error: null,
+  
+  // Actions
+  createJobPosting: async (file: File) => {
+    set({ isCreatingJob: true, error: null });
+    try {
+      logger.info('Creating job posting', { filename: file.name });
+      const result = await api.createJobPosting(file);
+      
+      logger.info('Job posting created successfully', { 
+        jobId: result.job_id,
+        publicLink: result.public_link 
+      });
+      
+      // Reload job postings to include the new one
+      get().loadJobPostings();
+      
+      set({ isCreatingJob: false });
+      return result;
+    } catch (error: any) {
+      logger.error('Failed to create job posting:', error);
+      set({ 
+        isCreatingJob: false, 
+        error: error.message || 'Failed to create job posting' 
+      });
+      return null;
     }
-  );
-  return response.data;
-}
-}
-
-
-// Create singleton instance
-export const apiClient = new ApiClient();
-
-// Export individual functions for easier consumption
-export const api = {
-  // Health
-  healthCheck: () => RequestRetryHandler.withRetry(() => apiClient.healthCheck()),
+  },
   
-  // CV operations
-  uploadCV: (file: File, cvText?: string) => RequestRetryHandler.withRetry(() => apiClient.uploadCV(file, cvText)),
-  listCVs: () => RequestRetryHandler.withRetry(() => apiClient.listCVs()),
-  getCVDetails: (cvId: string) => RequestRetryHandler.withRetry(() => apiClient.getCVDetails(cvId)),
-  deleteCV: (cvId: string) => RequestRetryHandler.withRetry(() => apiClient.deleteCV(cvId)),
-  reprocessCV: (cvId: string) => RequestRetryHandler.withRetry(() => apiClient.reprocessCV(cvId)),
-  getCVEmbeddings: (cvId: string) => RequestRetryHandler.withRetry(() => apiClient.getCVEmbeddings(cvId)),
-  standardizeCV: (cvText: string, filename?: string) => RequestRetryHandler.withRetry(() => apiClient.standardizeCV(cvText, filename)),
+  // stores/careersStore.ts
+
+// Update the loadJobPostings action
+loadJobPostings: async () => {
+  set({ isLoading: true, error: null });
+  try {
+    logger.info('Loading job postings');
+    // Pass true to include inactive job postings
+    const postings = await api.listJobPostings(true);
+    
+    logger.info(`Loaded ${postings.length} job postings`);
+    set({ jobPostings: postings, isLoading: false });
+  } catch (error: any) {
+    logger.error('Failed to load job postings:', error);
+    set({ 
+      isLoading: false, 
+      error: error.message || 'Failed to load job postings' 
+    });
+  }
+},
   
-  // JD operations
-  uploadJD: (file: File, jdText?: string) => RequestRetryHandler.withRetry(() => apiClient.uploadJD(file, jdText)),
-  listJDs: () => RequestRetryHandler.withRetry(() => apiClient.listJDs()),
-  getJDDetails: (jdId: string) => RequestRetryHandler.withRetry(() => apiClient.getJDDetails(jdId)),
-  deleteJD: (jdId: string) => RequestRetryHandler.withRetry(() => apiClient.deleteJD(jdId)),
-  reprocessJD: (jdId: string) => RequestRetryHandler.withRetry(() => apiClient.reprocessJD(jdId)),
-  getJDEmbeddings: (jdId: string) => RequestRetryHandler.withRetry(() => apiClient.getJDEmbeddings(jdId)),
-  standardizeJD: (jdText: string, filename?: string) => RequestRetryHandler.withRetry(() => apiClient.standardizeJD(jdText, filename)),
+  selectJob: (job: JobPostingListItem) => {
+    logger.info('Selected job', { jobId: job.job_id, title: job.job_title });
+    set({ selectedJob: job });
+    // Auto-load applications when job is selected
+    get().loadJobApplications(job.job_id);
+  },
   
-  // Matching
-  matchCandidates: (request: MatchRequest) => RequestRetryHandler.withRetry(() => apiClient.matchCandidates(request)),
-  matchText: (jdText: string, cvText: string) => RequestRetryHandler.withRetry(() => apiClient.matchText(jdText, cvText)),
+  updateJobStatus: async (jobId: string, isActive: boolean) => {
+    set({ isUpdatingStatus: true, error: null });
+    try {
+      logger.info('Updating job status', { jobId, isActive });
+      await api.updateJobStatus(jobId, { is_active: isActive });
+      
+      // Update the job in the local state
+      set((state) => ({
+        jobPostings: state.jobPostings.map(job => 
+          job.job_id === jobId ? { ...job, is_active: isActive } : job
+        ),
+        selectedJob: state.selectedJob?.job_id === jobId 
+          ? { ...state.selectedJob, is_active: isActive } 
+          : state.selectedJob,
+        isUpdatingStatus: false
+      }));
+      
+      logger.info('Job status updated successfully', { jobId, isActive });
+      return true;
+    } catch (error: any) {
+      logger.error('Failed to update job status:', error);
+      set({ 
+        isUpdatingStatus: false, 
+        error: error.message || 'Failed to update job status' 
+      });
+      return false;
+    }
+  },
   
-  // System
-  getSystemStats: () => RequestRetryHandler.withRetry(() => apiClient.getSystemStats()),
-  getDatabaseStatus: () => RequestRetryHandler.withRetry(() => apiClient.getDatabaseStatus()),
-  getDatabaseView: () => RequestRetryHandler.withRetry(() => apiClient.getDatabaseView()),
-  clearDatabase: (confirm: boolean) => RequestRetryHandler.withRetry(() => apiClient.clearDatabase(confirm)),
-  downloadCV: (cvId: string) => RequestRetryHandler.withRetry(() => apiClient.downloadCV(cvId)),
+  loadJobApplications: async (jobId: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      logger.info('Loading applications for job', { jobId });
+      const applications = await api.getJobApplications(jobId);
+      
+      logger.info(`Loaded ${applications.length} applications for job ${jobId}`);
+      set({ applications, isLoading: false });
+    } catch (error: any) {
+      logger.error('Failed to load applications:', error);
+      set({ 
+        isLoading: false, 
+        error: error.message || 'Failed to load applications' 
+      });
+    }
+  },
+  
+  // stores/careersStore.ts
 
-  // Auth
-  login: (username: string, password: string) => RequestRetryHandler.withRetry(() => apiClient.login(username, password)),
-  me: (token: string) => RequestRetryHandler.withRetry(() => apiClient.me(token)),
-
-  // Admin Users (admin only)
-  listUsers: (token: string) => RequestRetryHandler.withRetry(() => apiClient.listUsers(token)),
-  createUser: (token: string, body: CreateUserRequest) => RequestRetryHandler.withRetry(() => apiClient.createUser(token, body)),
-  updateUser: (token: string, id: string, body: UpdateUserRequest) => RequestRetryHandler.withRetry(() => apiClient.updateUser(token, id, body)),
-  deleteUser: (token: string, id: string) => RequestRetryHandler.withRetry(() => apiClient.deleteUser(token, id)),
-
-  // Careers API
-  createJobPosting: (file: File) => RequestRetryHandler.withRetry(() => apiClient.createJobPosting(file)),
-  listJobPostings: (includeInactive: boolean = false) => 
-  RequestRetryHandler.withRetry(() => apiClient.listJobPostings(includeInactive)),
-  getPublicJob: (token: string) => RequestRetryHandler.withRetry(() => apiClient.getPublicJob(token)),
-  submitJobApplication: (token: string, name: string, email: string, phone: string | undefined, cvFile: File) => 
-    RequestRetryHandler.withRetry(() => apiClient.submitJobApplication(token, name, email, phone, cvFile)),
-  getJobApplications: (jobId: string) => RequestRetryHandler.withRetry(() => apiClient.getJobApplications(jobId)),
-
-  updateJobStatus: (jobId: string, status: { is_active: boolean }) => 
-  RequestRetryHandler.withRetry(() => apiClient.updateJobStatus(jobId, status)),
-};
-
-// Re-export types for convenience
-export type { AdminUser, CreateUserRequest, UpdateUserRequest, LoginResponse, UserProfile } from './types';
-
+loadPublicJob: async (token: string) => {
+  set({ isLoading: true, error: null });
+  try {
+    logger.info('Loading public job', { token: token.substring(0, 8) + '...' });
+    const job = await api.getPublicJob(token);
+    
+    logger.info('Public job loaded successfully', { 
+      jobId: job.job_id, 
+      title: job.job_title 
+    });
+    set({ publicJob: job, isLoading: false });
+  } catch (error: any) {
+    logger.error('Failed to load public job:', error);
+    set({ 
+      isLoading: false, 
+      error: error.message || 'Job not found or no longer available' 
+    });
+  }
+},
+  submitApplication: async (token: string, name: string, email: string, phone: string | undefined, cvFile: File) => {
+    set({ isSubmittingApplication: true, error: null });
+    try {
+      logger.info('Submitting job application', { 
+        token: token.substring(0, 8) + '...',
+        applicantName: name,
+        applicantEmail: email,
+        cvFileName: cvFile.name
+      });
+      
+      const result = await api.submitJobApplication(token, name, email, phone, cvFile);
+      
+      logger.info('Application submitted successfully', { 
+        applicationId: result.application_id 
+      });
+      
+      set({ isSubmittingApplication: false });
+      return result;
+    } catch (error: any) {
+      logger.error('Failed to submit application:', error);
+      set({ 
+        isSubmittingApplication: false, 
+        error: error.message || 'Failed to submit application' 
+      });
+      return null;
+    }
+  },
+  
+  clearError: () => {
+    set({ error: null });
+  },
+  
+  reset: () => {
+    logger.info('Resetting careers store');
+    set({
+      jobPostings: [],
+      selectedJob: null,
+      applications: [],
+      publicJob: null,
+      isLoading: false,
+      isCreatingJob: false,
+      isSubmittingApplication: false,
+      isUpdatingStatus: false,
+      error: null,
+    });
+  },
+}));
