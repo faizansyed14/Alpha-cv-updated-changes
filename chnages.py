@@ -1,1018 +1,677 @@
-'use client';
-import React, { useState, useEffect } from 'react';
-import {
-  FileText,
-  Users,
-  Trash2,
-  RefreshCw,
-  Eye,
-  Download,
-  AlertCircle,
-  CheckCircle,
-  Clock,
-  X,
-  Target,
-  Play,
-  ChevronDown,
-  Search,
-  Database,
-  AlertTriangle
-} from 'lucide-react';
-import { useAppStore } from '@/stores/appStore';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card-enhanced';
-import { Button } from '@/components/ui/button-enhanced';
-import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api } from '@/lib/api';
+"""
+Careers Routes - Public Job Postings & Applications
+Handles:
+  - HR job posting creation (authenticated)
+  - Public job viewing (no auth required)
+  - Public job applications (no auth required)
+  - Admin management of job postings and applications
+"""
 
-/* ----------------------------- Small utilities ---------------------------- */
-/* ----------------------------- Small utilities ---------------------------- */
-const toNum = (v: unknown) => {
-  if (v === null || v === undefined) return undefined;
-  const n = typeof v === 'string' ? Number(v) : v;
-  return Number.isFinite(n as number) ? (n as number) : undefined;
-};
-const firstNumber = (...vals: unknown[]) => {
-  for (const v of vals) {
-    const n = toNum(v);
-    if (n !== undefined) return n;
-  }
-  return 0;
-};
-const len = (a: unknown) => (Array.isArray(a) ? a.length : undefined);
+import logging
+import secrets
+import uuid
+from datetime import datetime
+from typing import Optional, List
 
-const formatDate = (dateString?: string) => {
-  if (!dateString) return 'N/A';
-  try {
-    return new Date(dateString).toLocaleDateString();
-  } catch {
-    return 'N/A';
-  }
-};
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.requests import Request
+import os
+from app.schemas.careers import (
+    JobPostingCreate,
+    JobPostingResponse, 
+    PublicJobView, 
+    JobApplicationRequest,
+    JobApplicationResponse,
+    JobApplicationSummary,
+    JobPostingSummary,
+    JobStatusUpdate,
+    ApplicationStatusUpdate,
+    JobMatchingRequest,
+    JobMatchingResponse,
+    CareersHealthResponse
+)
+from app.services.parsing_service import get_parsing_service
+from app.services.llm_service import get_llm_service  
+from app.services.embedding_service import get_embedding_service
+from app.utils.qdrant_utils import get_qdrant_utils
 
-/** Robustly derive name/title/years + counts across shapes */
-export const getCVBasics = (cv: any) => {
-  const cvData = cv?.cv || cv;
-  const candidate = cvData?.candidate || {};
-  const structured = cvData?.structured_info || {};
+logger = logging.getLogger(__name__)
+router = APIRouter()
 
-  const name =
-    candidate?.full_name ?? cvData?.full_name ?? 'Unknown';
-  const title =
-    candidate?.job_title ?? cvData?.job_title ?? 'Unknown';
-  const years =
-    candidate?.years_of_experience ?? cvData?.years_of_experience ?? '0';
+# Constants
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+SUPPORTED_EXTENSIONS = ['.pdf', '.docx', '.doc', '.txt']
 
-  // ✅ Include possible counts at the root level of list items
-  const skillsCount = firstNumber(
-    candidate?.skills_count,
-    cvData?.skills_count,
-    structured?.skills_count,
-    len(candidate?.skills),
-    len(structured?.skills),
-    len(structured?.skills_sentences),
-    len(cvData?.skills)
-  );
+def generate_public_token() -> str:
+    """Generate secure random token for public job links"""
+    return secrets.token_urlsafe(32)
 
-  const respCount = firstNumber(
-    candidate?.responsibilities_count,
-    cvData?.responsibilities_count,               // <-- added
-    structured?.responsibilities_count,
-    len(candidate?.responsibilities),
-    len(structured?.responsibilities),
-    len(structured?.responsibility_sentences),
-    len(cvData?.responsibilities)
-  );
+def validate_file_upload(file: UploadFile) -> None:
+    """Validate uploaded file meets requirements"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    
+    # Check file extension
+    file_ext = '.' + file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+    if file_ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File type {file_ext} not supported. Supported types: {SUPPORTED_EXTENSIONS}"
+        )
+    
+    # Note: File size validation happens during read if needed
+    logger.info(f"✅ File validation passed: {file.filename}")
 
-  return { name, title, years, skillsCount, respCount };
-};
+def _now_iso() -> str:
+    """Get current timestamp in ISO format"""
+    return datetime.utcnow().isoformat()
 
+# ==================== PUBLIC ENDPOINTS (No Authentication) ====================
 
-
-const getJDBasics = (jd: any) => {
-  // Handle nested API response structure: response.jd or direct response
-  const jdData = jd?.jd || jd;
-  const src = jdData?.job_requirements || jdData?.structured_info || {};
-  
-  const title = src.job_title ?? jdData?.job_title ?? 'N/A';
-  const years =
-    src.years_of_experience ?? src.experience_years ?? jdData?.years_of_experience ?? '0';
-  const skills =
-    src.skills ??
-    jdData?.skills ??
-    [];
-  const responsibilities =
-    src.responsibilities ??
-    src.responsibility_sentences ??
-    jdData?.responsibilities ??
-    [];
-  const skillsCount =
-    src.skills_count ?? jdData?.skills_count ?? (Array.isArray(skills) ? skills.length : 0);
-  const responsibilitiesCount =
-    src.responsibilities_count ??
-    jdData?.responsibilities_count ??
-    (Array.isArray(responsibilities) ? responsibilities.length : 0);
-  return { title, years, skills, responsibilities, skillsCount, responsibilitiesCount };
-};
-
-/* -------------------------------- Component ------------------------------- */
-export default function DatabasePageNew() {
-  const {
-    cvs,
-    jds,
-    selectedCVs,
-    selectedJD,
-    loadingStates,
-    loadCVs,
-    loadJDs,
-    selectCV,
-    deselectCV,
-    selectAllCVs,
-    deselectAllCVs,
-    selectJD,
-    deleteCV,
-    deleteJD,
-    reprocessCV,
-    reprocessJD,
-    setCurrentTab,
-    runMatch,
-  } = useAppStore();
-  
-  const [selectedCVForDetails, setSelectedCVForDetails] = useState<string | null>(null);
-  const [selectedJDForDetails, setSelectedJDForDetails] = useState<string | null>(null);
-  const [showJDJSON, setShowJDJSON] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filteredCVs, setFilteredCVs] = useState<any[]>([]);
-  const [filteredJDs, setFilteredJDs] = useState<any[]>([]);
-  const [showClearDialog, setShowClearDialog] = useState(false);
-  const [isClearing, setIsClearing] = useState(false);
-  
-  useEffect(() => {
-    loadCVs();
-    loadJDs();
-  }, [loadCVs, loadJDs]);
-  
-  useEffect(() => {
-    // Filter CVs based on search query
-    if (!searchQuery.trim()) {
-      setFilteredCVs(cvs);
-    } else {
-      const query = searchQuery.toLowerCase();
-      const filtered = cvs.filter(cv => {
-        const basics = getCVBasics(cv);
-        return (
-          basics.name.toLowerCase().includes(query) ||
-          cv.id.toLowerCase().includes(query) ||
-          basics.title.toLowerCase().includes(query)
-        );
-      });
-      setFilteredCVs(filtered);
-    }
-  }, [cvs, searchQuery]);
-  
-  useEffect(() => {
-    // Filter JDs based on search query
-    if (!searchQuery.trim()) {
-      setFilteredJDs(jds);
-    } else {
-      const query = searchQuery.toLowerCase();
-      const filtered = jds.filter(jd => {
-        const basics = getJDBasics(jd);
-        return (
-          jd.id.toLowerCase().includes(query) ||
-          basics.title.toLowerCase().includes(query)
-        );
-      });
-      setFilteredJDs(filtered);
-    }
-  }, [jds, searchQuery]);
-  
-  const isLoadingCVs = loadingStates.cvs.isLoading;
-  const isLoadingJDs = loadingStates.jds.isLoading;
-  const isDeleting = loadingStates.upload.isLoading;
-  
-  const handleDeleteCV = async (cvId: string) => {
-    if (window.confirm('Are you sure you want to delete this CV?')) {
-      await deleteCV(cvId);
-    }
-  };
-  
-  const handleDeleteJD = async (jdId: string) => {
-    if (window.confirm('Are you sure you want to delete this job description?')) {
-      await deleteJD(jdId);
-    }
-  };
-  
-  const handleReprocessCV = async (cvId: string) => {
-    await reprocessCV(cvId);
-  };
-  
-  const handleReprocessJD = async (jdId: string) => {
-    await reprocessJD(jdId);
-  };
-  
-  const canStartMatching = selectedCVs.length > 0 && selectedJD;
-  const handleStartMatching = async () => {
-    await runMatch();
-    setCurrentTab('match');
-  };
-  
-  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchQuery(e.target.value);
-  };
-  
-  const clearSearch = () => {
-    setSearchQuery('');
-  };
-  
-  const handleClearDatabase = async () => {
-    setIsClearing(true);
-    try {
-      await api.clearDatabase(true);
-      await loadCVs();
-      await loadJDs();
-      setShowClearDialog(false);
-    } catch (error: any) {
-      console.error('Failed to clear database:', error);
-    } finally {
-      setIsClearing(false);
-    }
-  };
-  
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="heading-lg">Document Database</h1>
-          <p className="text-lg mt-1" style={{ color: 'var(--gray-600)' }}>
-            Manage your CVs and job descriptions
-          </p>
-        </div>
-        <div className="flex items-center space-x-3">
-          <Dialog open={showClearDialog} onOpenChange={setShowClearDialog}>
-            <DialogTrigger asChild>
-              <Button
-                variant="outline"
-                className="text-red-600 border-red-300 hover:bg-red-50"
-              >
-                <Trash2 className="w-4 h-4 mr-2" />
-                Clear Database
-              </Button>
-            </DialogTrigger>
-            <DialogContent
-  className="bg-rose-50 border border-rose-300 shadow-xl rounded-lg p-6 data-[state=open]:animate-in 
-             data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 
-             data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
->
-  <DialogHeader>
-    <DialogTitle className="flex items-center gap-2 text-rose-700">
-      <AlertTriangle className="h-5 w-5 text-rose-500" />
-      Confirm Database Clear
-    </DialogTitle>
-  </DialogHeader>
-  <div className="space-y-4">
-    <p className="text-gray-800">
-      Are you sure you want to permanently delete all CVs and job descriptions?
-    </p>
-    <p className="text-sm text-rose-600 font-medium">This action cannot be undone.</p>
-    <div className="flex justify-end space-x-2">
-      <Button variant="outline" onClick={() => setShowClearDialog(false)}>
-        Cancel
-      </Button>
-      <Button
-        variant="error"
-        onClick={handleClearDatabase}
-        disabled={isClearing}
-        className="bg-rose-600 hover:bg-rose-700"
-      >
-        {isClearing ? 'Clearing...' : 'Clear All Data'}
-      </Button>
-    </div>
-  </div>
-</DialogContent>
-          </Dialog>
-          <Button
-            variant="outline"
-            onClick={() => {
-              loadCVs();
-              loadJDs();
-            }}
-            disabled={isLoadingCVs || isLoadingJDs}
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Refresh
-          </Button>
-          {canStartMatching && (
-            <Button
-              variant="primary"
-              onClick={handleStartMatching}
-              disabled={loadingStates.matching.isLoading}
-            >
-              <Play className="w-4 h-4 mr-2" />
-              {loadingStates.matching.isLoading ? 'Matching...' : 'Match Selected'}
-            </Button>
-          )}
-        </div>
-      </div>
-      
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="p-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 bg-blue-100 rounded-lg">
-              <Users className="w-6 h-6 text-blue-600" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-gray-500">Total CVs</p>
-              <p className="text-2xl font-bold text-gray-900">{cvs.length}</p>
-            </div>
-          </div>
-        </Card>
-        <Card className="p-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 bg-green-100 rounded-lg">
-              <FileText className="w-6 h-6 text-green-600" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-gray-500">Job Descriptions</p>
-              <p className="text-2xl font-bold text-gray-900">{jds.length}</p>
-            </div>
-          </div>
-        </Card>
-        <Card className="p-6">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 bg-purple-100 rounded-lg">
-              <Target className="w-6 h-6 text-purple-600" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-gray-500">Ready to Match</p>
-              <p className="text-2xl font-bold text-gray-900">{canStartMatching ? 'Yes' : 'No'}</p>
-            </div>
-          </div>
-        </Card>
-      </div>
-      
-      {/* Search Bar */}
-      <Card className="p-4">
-        <div className="flex items-center space-x-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Search by name, ID, or job title..."
-              value={searchQuery}
-              onChange={handleSearchChange}
-              className="w-full pl-10 pr-8 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-            {searchQuery && (
-              <button
-                onClick={clearSearch}
-                className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-        </div>
-        {searchQuery && (
-          <div className="mt-2 text-sm text-gray-500">
-            Showing {filteredCVs.length} of {cvs.length} CVs and {filteredJDs.length} of {jds.length} Job Descriptions
-          </div>
-        )}
-      </Card>
-      
-      {/* Document Tabs */}
-      <Tabs defaultValue="cvs" className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="cvs" className="flex items-center space-x-2">
-            <Users className="w-4 h-4" />
-            <span>CVs ({filteredCVs.length})</span>
-          </TabsTrigger>
-          <TabsTrigger value="jds" className="flex items-center space-x-2">
-            <FileText className="w-4 h-4" />
-            <span>Job Descriptions ({filteredJDs.length})</span>
-          </TabsTrigger>
-        </TabsList>
+@router.get("/jobs/{public_token}", response_model=PublicJobView)
+async def get_public_job(public_token: str) -> PublicJobView:
+    """
+    Public endpoint: View job posting (no authentication required)
+    
+    This endpoint must be accessible to anyone with the link.
+    Returns structured job information for display to candidates.
+    """
+    try:
+        logger.info(f"📄 Public job request for token: {public_token[:8]}...")
         
-        {/* CVs Tab */}
-        <TabsContent value="cvs" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Candidate CVs</CardTitle>
-                <div className="flex items-center space-x-2">
-                  <Button variant="outline" size="sm" onClick={selectAllCVs} disabled={filteredCVs.length === 0}>
-                    Select All
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={deselectAllCVs} disabled={selectedCVs.length === 0}>
-                    Deselect All
-                  </Button>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {isLoadingCVs ? (
-                <div className="flex items-center justify-center py-8">
-                  <Clock className="w-6 h-6 animate-spin mr-2" />
-                  <span>Loading CVs...</span>
-                </div>
-              ) : filteredCVs.length === 0 ? (
-                <div className="text-center py-8">
-                  <AlertCircle className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">
-                    {searchQuery ? 'No CVs match your search' : 'No CVs uploaded'}
-                  </h3>
-                  <p className="text-gray-500 mb-4">
-                    {searchQuery 
-                      ? 'Try adjusting your search terms' 
-                      : 'Upload CVs to get started with matching'}
-                  </p>
-                  {!searchQuery && (
-                    <Button onClick={() => setCurrentTab('upload')}>Upload CVs</Button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {filteredCVs.map((cv) => {
-                    const b = getCVBasics(cv);
-                    return (
-                      <div
-                        key={cv.id}
-                        className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50"
-                      >
-                        <div className="flex items-center space-x-3">
-                          <input
-                            type="checkbox"
-                            checked={selectedCVs.includes(cv.id)}
-                            onChange={() => {
-                              if (selectedCVs.includes(cv.id)) {
-                                deselectCV(cv.id);
-                              } else {
-                                selectCV(cv.id);
-                              }
-                            }}
-                            className="h-4 w-4 text-blue-600 rounded"
-                          />
-                          <div className="p-2 bg-blue-100 rounded-lg">
-                            <Users className="w-5 h-5 text-blue-600" />
-                          </div>
-                          <div>
-                            <h4 className="font-medium text-gray-900">{b.name}</h4>
-                            <p className="text-sm text-gray-500">
-                              {b.title} • {b.years} years
-                            </p>
-                            <div className="flex items-center space-x-2 mt-1">
-                              <Badge variant="secondary">{b.skillsCount} skills</Badge>
-                              <Badge variant="outline">{b.respCount} responsibilities</Badge>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Dialog>
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setSelectedCVForDetails(cv.id)}
-                              >
-                                <Eye className="w-4 h-4" />
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto bg-white rounded-lg shadow-xl">
-                              <DialogHeader className="flex flex-row items-center justify-between">
-                                <DialogTitle className="text-xl font-semibold">CV Details</DialogTitle>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setSelectedCVForDetails(null)}
-                                  className="h-6 w-6 rounded-full hover:bg-gray-100"
-                                >
-                                  <X className="h-4 w-4" />
-                                </Button>
-                              </DialogHeader>
-                              <CVDetails cvId={cv.id} />
-                            </DialogContent>
-                          </Dialog>
-                          <Button variant="ghost" size="sm" onClick={() => handleReprocessCV(cv.id)} disabled={isDeleting}>
-                            <RefreshCw className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteCV(cv.id)}
-                            disabled={isDeleting}
-                            className="text-red-500 hover:text-red-700"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
+        qdrant = get_qdrant_utils()
+        job_data = qdrant.get_job_posting_by_token(public_token)
         
-        {/* JDs Tab */}
-        <TabsContent value="jds" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Job Descriptions</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {isLoadingJDs ? (
-                <div className="flex items-center justify-center py-8">
-                  <Clock className="w-6 h-6 animate-spin mr-2" />
-                  <span>Loading Job Descriptions...</span>
-                </div>
-              ) : filteredJDs.length === 0 ? (
-                <div className="text-center py-8">
-                  <AlertCircle className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">
-                    {searchQuery ? 'No Job Descriptions match your search' : 'No Job Descriptions uploaded'}
-                  </h3>
-                  <p className="text-gray-500 mb-4">
-                    {searchQuery 
-                      ? 'Try adjusting your search terms' 
-                      : 'Upload job descriptions to get started with matching'}
-                  </p>
-                  {!searchQuery && (
-                    <Button onClick={() => setCurrentTab('upload')}>Upload Job Descriptions</Button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {filteredJDs.map((jd) => {
-                    const b = getJDBasics(jd);
-                    return (
-                      <div
-                        key={jd.id}
-                        className={`flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 ${
-                          selectedJD === jd.id ? 'border-blue-500 bg-blue-50' : ''
-                        }`}
-                      >
-                        <div className="flex items-center space-x-3">
-                          <input
-                            type="radio"
-                            name="selectedJD"
-                            checked={selectedJD === jd.id}
-                            onChange={() => selectJD(jd.id)}
-                            className="h-4 w-4 text-blue-600"
-                          />
-                          <div className="p-2 bg-green-100 rounded-lg">
-                            <FileText className="w-5 h-5 text-green-600" />
-                          </div>
-                          <div>
-                            <h4 className="font-medium text-gray-900">{b.title}</h4>
-                            <p className="text-sm text-gray-500">{b.years} experience required</p>
-                            <div className="flex items-center space-x-2 mt-1">
-                              <Badge variant="secondary">{b.skillsCount} skills</Badge>
-                              <Badge variant="outline">{b.responsibilitiesCount} responsibilities</Badge>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Dialog>
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setSelectedJDForDetails(jd.id)}
-                              >
-                                <Eye className="w-4 h-4" />
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto bg-white rounded-lg shadow-xl">
-                              <DialogHeader className="flex flex-row items-center justify-between">
-                                <DialogTitle className="text-xl font-semibold">Job Description Details</DialogTitle>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setSelectedJDForDetails(null)}
-                                  className="h-6 w-6 rounded-full hover:bg-gray-100"
-                                >
-                                  <X className="h-4 w-4" />
-                                </Button>
-                              </DialogHeader>
-                              <JDDetails jdId={jd.id} />
-                            </DialogContent>
-                          </Dialog>
-                          <Button variant="ghost" size="sm" onClick={() => handleReprocessJD(jd.id)} disabled={isDeleting}>
-                            <RefreshCw className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteJD(jd.id)}
-                            disabled={isDeleting}
-                            className="text-red-500 hover:text-red-700"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-    </div>
-  );
-}
+        if not job_data:
+            logger.warning(f"❌ Job posting not found for token: {public_token[:8]}...")
+            raise HTTPException(status_code=404, detail="Job posting not found or no longer active")
+        
+        # Get structured data if available
+        client = qdrant.client
+        structured_data = None
+        try:
+            res = client.retrieve("job_postings_structured", ids=[job_data["id"]], with_payload=True, with_vectors=False)
+            if res:
+                structured_data = res[0].payload
+        except Exception as e:
+            logger.warning(f"Could not retrieve structured data for job {job_data['id']}: {e}")
+            structured_data = None
+        
+        # Extract requirements and responsibilities from structured data
+        requirements = []
+        responsibilities = []
+        job_title = "Position Available"
+        experience_required = "Not specified"
+        
+        if structured_data:
+            structured_info = structured_data.get("structured_info", {})
+            requirements = structured_info.get("skills", []) or structured_info.get("requirements", [])
+            responsibilities = structured_info.get("responsibilities", []) or structured_info.get("duties", [])
+            job_title = structured_info.get("job_title", job_title)
+            experience_required = structured_info.get("years_of_experience", experience_required)
+            if isinstance(experience_required, (int, float)):
+                experience_required = f"{experience_required} years"
+        
+        public_job = PublicJobView(
+            job_id=job_data["id"],
+            job_title=job_title,
+            company_name=job_data.get("company_name", "Our Company"),
+            job_description=job_data["raw_content"],
+            upload_date=job_data["upload_date"],
+            requirements=requirements[:10],  # Limit to top 10 for display
+            responsibilities=responsibilities[:10],  # Limit to top 10 for display
+            experience_required=str(experience_required),
+            is_active=job_data.get("is_active", True)
+        )
+        
+        logger.info(f"✅ Returning public job: {job_title}")
+        return public_job
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get public job: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load job posting")
 
-/* ---------------------------- CV Details (modal) --------------------------- */
-function CVDetails({ cvId }: { cvId: string }) {
-  const [cv, setCV] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  
-  useEffect(() => {
-    const loadCV = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const response = await api.getCVDetails(cvId);
-        const cvData = response;
-        setCV(cvData);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load CV details');
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadCV();
-  }, [cvId]);
-  
-  if (loading) return <div className="flex items-center justify-center py-8">Loading CV details...</div>;
-  if (error)
-    return (
-      <div className="text-center py-8">
-        <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-4" />
-        <h3 className="text-lg font-medium text-red-900 mb-2">Error Loading CV</h3>
-        <p className="text-red-500 mb-4">{error}</p>
-      </div>
-    );
-  if (!cv) return <div className="text-center py-8">CV not found</div>;
-  
-  const b = getCVBasics(cv);
-  
-  return (
-    <div className="space-y-4">
-      {/* Candidate Info */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Candidate Information</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <h4 className="text-sm font-medium text-gray-500">Full Name</h4>
-            <p className="text-base font-semibold">{b.name}</p>
-          </div>
-          <div>
-            <h4 className="text-sm font-medium text-gray-500">Job Title</h4>
-            <p className="text-base font-semibold">{b.title}</p>
-          </div>
-          <div>
-            <h4 className="text-sm font-medium text-gray-500">Experience</h4>
-            <p className="text-base font-semibold">{b.years} years</p>
-          </div>
-          <div>
-            <h4 className="text-sm font-medium text-gray-500">Upload Date</h4>
-            <p className="text-base font-semibold">{formatDate(cv?.cv?.upload_date || cv?.upload_date)}</p>
-          </div>
-        </div>
+@router.post("/jobs/{public_token}/apply", response_model=JobApplicationResponse)
+async def apply_to_job(
+    public_token: str,
+    applicant_name: str = Form(..., min_length=2, max_length=100),
+    applicant_email: str = Form(...),
+    applicant_phone: Optional[str] = Form(None),
+    cover_letter: Optional[str] = Form(None),
+    cv_file: UploadFile = File(...)
+) -> JobApplicationResponse:
+    """
+    Public endpoint: Submit application (no authentication required)
+    
+    Pipeline:
+    1. Validate job exists and is active
+    2. Validate application data and CV file
+    3. Process CV through existing pipeline (parsing → LLM → embeddings)
+    4. Link application to specific job
+    5. Store in applications_* collections
+    6. Also store in cv_* collections for main database view
+    7. Return confirmation
+    """
+    try:
+        logger.info(f"📋 Application received for job token: {public_token[:8]}... from {applicant_name}")
         
-        {/* Contact Information */}
-<div className="mt-4">
-  <h4 className="text-sm font-medium text-gray-500 mb-2">Contact Information</h4>
-  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-    <div>
-      <p className="text-sm text-gray-600">Email</p>
-      <p className="font-medium text-blue-600">
-        {(() => {
-          // Try multiple paths to find the email
-          const email = cv?.cv?.candidate?.contact_info?.email || 
-                        cv?.cv?.structured_info?.contact_info?.email ||
-                        cv?.candidate?.contact_info?.email ||
-                        cv?.structured_info?.contact_info?.email;
-          
-          // If not found in structured data, try to extract from text preview
-          if (!email) {
-            const textPreview = cv?.cv?.text_info?.extracted_text_preview || 
-                               cv?.text_info?.extracted_text_preview || 
-                               cv?.extracted_text_preview || '';
+        # 1. Verify job exists and is active
+        qdrant = get_qdrant_utils()
+        job_data = qdrant.get_job_posting_by_token(public_token)
+        if not job_data:
+            raise HTTPException(status_code=404, detail="Job posting not found or no longer active")
             
-            // Extract email using regex
-            const emailMatch = textPreview.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
-            return emailMatch ? emailMatch[0] : 'not provided';
-          }
-          
-          return email || 'not provided';
-        })()}
-      </p>
-    </div>
-    <div>
-      <p className="text-sm text-gray-600">Phone</p>
-      <p className="font-medium text-blue-600">
-        {(() => {
-          // Try multiple paths to find the phone
-          const phone = cv?.cv?.candidate?.contact_info?.phone || 
-                        cv?.cv?.structured_info?.contact_info?.phone ||
-                        cv?.candidate?.contact_info?.phone ||
-                        cv?.structured_info?.contact_info?.phone;
-          
-          // If not found in structured data, try to extract from text preview
-          if (!phone) {
-            const textPreview = cv?.cv?.text_info?.extracted_text_preview || 
-                               cv?.text_info?.extracted_text_preview || 
-                               cv?.extracted_text_preview || '';
+        if not job_data.get("is_active", True):
+            raise HTTPException(status_code=400, detail="This job posting is no longer accepting applications")
+        
+        # 2. Validate CV file
+        validate_file_upload(cv_file)
+        
+        # Basic email validation
+        if "@" not in applicant_email or "." not in applicant_email:
+            raise HTTPException(status_code=400, detail="Please provide a valid email address")
+        
+        application_id = str(uuid.uuid4())
+        cv_id = str(uuid.uuid4())  # Create a separate ID for the CV collection
+        
+        # 3. Process CV through existing pipeline
+        logger.info(f"🔄 Processing CV for application {application_id}")
+        
+        # Read file content
+        file_content = await cv_file.read()
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB")
+        
+        # Extract text using parsing service
+        import tempfile
+        import os
+        
+        # Get file extension for temp file
+        file_ext = '.' + cv_file.filename.split('.')[-1].lower() if '.' in cv_file.filename else '.txt'
+        
+        # Save to temporary file for parsing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
+        
+        try:
+            parsing_service = get_parsing_service()
+            parsed = parsing_service.process_document(tmp_path, "cv")
+            extracted_text = parsed["clean_text"]
+            raw_content = parsed["raw_text"]
+            # Get PII extracted from CV
+            extracted_pii = parsed.get("extracted_pii", {"email": [], "phone": []})
+        finally:
+            # Clean up temporary file
+            os.unlink(tmp_path)
+        
+        if not extracted_text or len(extracted_text.strip()) < 50:
+            raise HTTPException(status_code=400, detail="Could not extract sufficient text from CV. Please check the file format.")
+        
+        # Process with LLM service
+        llm_service = get_llm_service()
+        llm_result = llm_service.standardize_cv(extracted_text, cv_file.filename)
+        
+        # Update contact_info with application form data (prioritize form data over extracted PII)
+        if "contact_info" not in llm_result:
+            llm_result["contact_info"] = {}
+        
+        # Always use the application form data for contact information
+        llm_result["contact_info"]["name"] = applicant_name
+        llm_result["contact_info"]["email"] = applicant_email
+        if applicant_phone:
+            llm_result["contact_info"]["phone"] = applicant_phone
+        
+        # Also update the name field if it exists
+        if "name" in llm_result:
+            llm_result["name"] = applicant_name
             
-            // Extract phone using regex
-            const phoneMatch = textPreview.match(/(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
-            return phoneMatch ? phoneMatch[0] : 'not provided';
-          }
-          
-          return phone || 'not provided';
-        })()}
-      </p>
-    </div>
-  </div>
-</div>
-      </div>
-      
-      {/* Skills */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Skills</h3>
-          <Badge className="ml-2">{b.skillsCount}</Badge>
-        </div>
-        {(() => {
-  const cvData = cv?.cv || cv;
-  const candidate = cvData?.candidate || {};
-  const structured = cvData?.structured_info || {};
-  const responsibilities =
-    candidate?.responsibilities ??
-    structured?.responsibilities ??
-    structured?.responsibility_sentences ??
-    cvData?.responsibilities ??
-    [];
-  return responsibilities.length ? (
-    <ul className="space-y-2">
-      {responsibilities.map((resp: string, i: number) => (
-        <li key={i} className="text-gray-700">{resp}</li>
-      ))}
-    </ul>
-  ) : (
-    <p className="text-gray-500">No responsibilities available</p>
-  );
-})()}
+        logger.info(f"✅ Updated contact info with application data: {applicant_name}, {applicant_email}")
+        
+        # Generate embeddings
+        embedding_service = get_embedding_service()
+        embeddings_data = embedding_service.generate_document_embeddings(llm_result)
+        
+        # 4. Store application data
+        application_data = {
+            "applicant_name": applicant_name,
+            "applicant_email": applicant_email,
+            "applicant_phone": applicant_phone,
+            "cover_letter": cover_letter,
+            "public_token": public_token,
+            "job_title": job_data.get("job_title", "Position"),
+            "company_name": job_data.get("company_name", "Our Company")
+        }
+        
+        # 5. Store in applications collections following the 3-collection pattern
+        success_steps = []
+        
+        # Step 1: Store raw CV document in applications collection
+        success_steps.append(
+            qdrant.store_document(
+                application_id, "applications", cv_file.filename, 
+                cv_file.content_type or "application/octet-stream",
+                extracted_text,  # Store extracted text as raw content
+                _now_iso()
+            )
+        )
+        
+        # Step 2: Store structured data in applications collection
+        structured_payload = {
+            **llm_result,  # Include all LLM processed data (with updated contact info)
+            **application_data,  # Include application metadata
+            "application_id": application_id,
+            "document_type": "application"
+        }
+        success_steps.append(
+            qdrant.store_structured_data(application_id, "applications", structured_payload)
+        )
+        
+        # Step 3: Store embeddings in applications collection (exactly 32 vectors)
+        success_steps.append(
+            qdrant.store_embeddings_exact(application_id, "applications", embeddings_data)
+        )
+        
+        # Step 4: Link application to job
+        success_steps.append(
+            qdrant.link_application_to_job(
+                application_id, job_data["id"], application_data, 
+                cv_file.filename, _now_iso()
+            )
+        )
+        
+        # 6. Also store in main CV collections for database view
+        # Store raw document in CV collection
+        success_steps.append(
+            qdrant.store_document(
+                cv_id, "cv", cv_file.filename,
+                cv_file.content_type or "application/octet-stream",
+                extracted_text, _now_iso()
+            )
+        )
+        
+        # Store structured data in CV collection (with updated contact info)
+        cv_structured_payload = {
+            **llm_result,  # Include all LLM processed data (with updated contact info)
+            "document_id": cv_id,
+            "document_type": "cv"
+        }
+        
+        # Ensure contact_info exists and includes application form data
+        if "contact_info" not in cv_structured_payload:
+            cv_structured_payload["contact_info"] = {}
+        
+        # Prioritize application form data over extracted PII
+        cv_structured_payload["contact_info"]["name"] = applicant_name
+        cv_structured_payload["contact_info"]["email"] = applicant_email
+        if applicant_phone:
+            cv_structured_payload["contact_info"]["phone"] = applicant_phone
+        
+        # Also update the name field if it exists
+        if "name" in cv_structured_payload:
+            cv_structured_payload["name"] = applicant_name
+            
+        success_steps.append(
+            qdrant.store_structured_data(cv_id, "cv", cv_structured_payload)
+        )
+        
+        # Store embeddings in CV collection
+        success_steps.append(
+            qdrant.store_embeddings_exact(cv_id, "cv", embeddings_data)
+        )
+        
+        # Verify all steps succeeded
+        if not all(success_steps):
+            logger.error(f"❌ Failed to store application {application_id} - some steps failed: {success_steps}")
+            raise HTTPException(status_code=500, detail="Failed to process application. Please try again.")
+            
+        logger.info(f"✅ Application {application_id} successfully processed and stored")
+        
+        return JobApplicationResponse(
+            success=True,
+            application_id=application_id,
+            message=f"Thank you, {applicant_name}! Your application has been submitted successfully.",
+            next_steps="We will review your CV and contact you if there's a match for this position."
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to process application: {e}")
+        raise HTTPException(status_code=500, detail="Failed to submit application. Please try again later.")
 
-      </div>
-      
-      {/* Responsibilities */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Responsibilities</h3>
-          <Badge className="ml-2">{b.respCount}</Badge>
-        </div>
-        {(() => {
-          const responsibilities = cv?.cv?.candidate?.responsibilities || cv?.candidate?.responsibilities || cv?.cv?.responsibilities || cv?.responsibilities || [];
-          return responsibilities.length ? (
-            <ul className="space-y-2">
-              {responsibilities.map((resp: string, i: number) => (
-                <li key={i} className="text-gray-700">{resp}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-gray-500">No responsibilities information available</p>
-          );
-        })()}
-      </div>
-      
-      {/* Text Preview */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Text Preview</h3>
-        <div className="bg-gray-50 p-3 rounded max-h-40 overflow-y-auto">
-          <p className="text-sm text-gray-700 whitespace-pre-line">
-            {cv?.cv?.text_info?.extracted_text_preview || cv?.text_info?.extracted_text_preview || cv?.extracted_text_preview || 'No text preview available'}
-          </p>
-        </div>
-        <div className="mt-2 text-sm text-gray-500">
-          Text length: {cv?.cv?.text_info?.extracted_text_length || cv?.text_info?.extracted_text_length || cv?.extracted_text_length || 0} characters
-        </div>
-      </div>
-      
-      {/* Processing / Embeddings */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-          <h3 className="text-lg font-semibold mb-3">Embeddings Information</h3>
-          <div className="space-y-2">
-            <Row label="Skills Embeddings" value={cv?.cv?.embeddings_info?.skills_embeddings || cv?.embeddings_info?.skills_embeddings || cv?.skills_embeddings || 0} />
-            <Row label="Responsibilities Embeddings" value={cv?.cv?.embeddings_info?.responsibilities_embeddings || cv?.embeddings_info?.responsibilities_embeddings || cv?.responsibilities_embeddings || 0} />
-            <Row label="Title Embedding" value={(cv?.cv?.embeddings_info?.has_title_embedding || cv?.embeddings_info?.has_title_embedding || cv?.has_title_embedding) ? 'Yes' : 'No'} />
-            <Row label="Experience Embedding" value={(cv?.cv?.embeddings_info?.has_experience_embedding || cv?.embeddings_info?.has_experience_embedding || cv?.has_experience_embedding) ? 'Yes' : 'No'} />
-            <Row label="Embedding Dimension" value={cv?.cv?.embeddings_info?.embedding_dimension || cv?.embeddings_info?.embedding_dimension || cv?.embedding_dimension || 'N/A'} />
-          </div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-          <h3 className="text-lg font-semibold mb-3">Processing Information</h3>
-          <div className="space-y-2">
-            <Row label="Filename" value={cv?.cv?.processing_metadata?.filename || cv?.processing_metadata?.filename || cv?.cv?.filename || cv?.filename || 'N/A'} mono />
-            <Row label="Model Used" value={cv?.cv?.processing_metadata?.model_used || cv?.processing_metadata?.model_used || cv?.model_used || 'N/A'} />
-            <Row
-              label="Processing Time"
-              value={
-                cv?.cv?.processing_metadata?.processing_time || cv?.processing_metadata?.processing_time || cv?.processing_time
-                  ? `${(
-                      (cv?.cv?.processing_metadata?.processing_time ??
-                        cv?.processing_metadata?.processing_time ??
-                        cv?.processing_time) as number
-                    ).toFixed(2)}s`
-                  : 'N/A'
-              }
-            />
-            <Row label="Text Length" value={cv?.cv?.processing_metadata?.text_length || cv?.cv?.text_info?.extracted_text_length || cv?.processing_metadata?.text_length || cv?.text_info?.extracted_text_length || cv?.text_length || 0} />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+# ==================== HR/ADMIN ENDPOINTS (May require authentication later) ====================
 
-/* ---------------------------- JD Details (modal) --------------------------- */
-function JDDetails({ jdId }: { jdId: string }) {
-  const [jd, setJD] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [showJSON, setShowJSON] = useState(false);
-  
-  useEffect(() => {
-    const loadJD = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const response = await api.getJDDetails(jdId);
-        // accept several shapes
-        const jdData = response;
-        setJD(jdData);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load JD details');
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadJD();
-  }, [jdId]);
-  
-  if (loading) return <div className="flex items-center justify-center py-8">Loading JD details...</div>;
-  if (error)
-    return (
-      <div className="text-center py-8">
-        <AlertCircle className="w-12 h-12 mx-auto text-red-500 mb-4" />
-        <h3 className="text-lg font-medium text-red-900 mb-2">Error Loading Job Description</h3>
-        <p className="text-red-500 mb-4">{error}</p>
-      </div>
-    );
-  if (!jd) return <div className="text-center py-8">Job Description not found</div>;
-  
-  const b = getJDBasics(jd);
-  
-  return (
-    <div className="space-y-4">
-      {/* Job Info */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Job Information</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Row label="Job Title" value={b.title} />
-          <Row label="Experience Required" value={`${b.years} years`} />
-          <Row label="Upload Date" value={formatDate(jd?.jd?.upload_date || jd?.upload_date)} />
-          <Row label="Document Type" value={jd?.jd?.document_type || jd?.document_type || 'jd'} />
-        </div>
-      </div>
-      
-      {/* Required Skills */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Required Skills</h3>
-          <Badge className="ml-2">{b.skillsCount}</Badge>
-        </div>
-        {b.skillsCount > 0 ? (
-          <ul className="space-y-2">
-            {b.skills.map((s: string, i: number) => (
-              <li key={i} className="text-gray-700">{s}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-gray-500">No skills information available</p>
-        )}
-      </div>
-      
-      {/* Responsibilities */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Responsibilities</h3>
-          <Badge className="ml-2">{b.responsibilitiesCount}</Badge>
-        </div>
-        {b.responsibilitiesCount > 0 ? (
-          <ul className="space-y-2">
-            {b.responsibilities.map((r: string, i: number) => (
-              <li key={i} className="text-gray-700">{r}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-gray-500">No responsibilities information available</p>
-        )}
-      </div>
-      
-      {/* Text Preview */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Text Preview</h3>
-        <div className="bg-gray-50 p-3 rounded max-h-40 overflow-y-auto">
-          <p className="text-sm text-gray-700 whitespace-pre-line">
-            {jd?.jd?.text_info?.extracted_text_preview || jd?.text_info?.extracted_text_preview || jd?.extracted_text_preview || 'No text preview available'}
-          </p>
-        </div>
-        <div className="mt-2 text-sm text-gray-500">
-          Text length: {jd?.jd?.text_info?.extracted_text_length || jd?.text_info?.extracted_text_length || jd?.extracted_text_length || 0} characters
-        </div>
-      </div>
-      
-      {/* Processing / Embeddings */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-          <h3 className="text-lg font-semibold mb-3">Embeddings Information</h3>
-          <div className="space-y-2">
-            <Row label="Skills Embeddings" value={jd?.jd?.embeddings_info?.skills_embeddings || jd?.embeddings_info?.skills_embeddings || jd?.skills_embeddings || 0} />
-            <Row
-              label="Responsibilities Embeddings"
-              value={jd?.jd?.embeddings_info?.responsibilities_embeddings || jd?.embeddings_info?.responsibilities_embeddings || jd?.responsibilities_embeddings || 0}
-            />
-            <Row
-              label="Title Embedding"
-              value={(jd?.jd?.embeddings_info?.has_title_embedding || jd?.embeddings_info?.has_title_embedding || jd?.has_title_embedding) ? 'Yes' : 'No'}
-            />
-            <Row
-              label="Experience Embedding"
-              value={(jd?.jd?.embeddings_info?.has_experience_embedding || jd?.embeddings_info?.has_experience_embedding || jd?.has_experience_embedding) ? 'Yes' : 'No'}
-            />
-            <Row label="Embedding Dimension" value={jd?.jd?.embeddings_info?.embedding_dimension || jd?.embeddings_info?.embedding_dimension || jd?.embedding_dimension || 'N/A'} />
-          </div>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-sm">
-          <h3 className="text-lg font-semibold mb-3">Processing Information</h3>
-          <div className="space-y-2">
-            <Row label="Filename" value={jd?.jd?.processing_metadata?.filename || jd?.processing_metadata?.filename || jd?.jd?.filename || jd?.filename || 'N/A'} mono />
-            <Row label="Model Used" value={jd?.jd?.processing_metadata?.model_used || jd?.processing_metadata?.model_used || jd?.model_used || 'N/A'} />
-            <Row
-              label="Processing Time"
-              value={
-                jd?.jd?.processing_metadata?.processing_time || jd?.processing_metadata?.processing_time || jd?.processing_time
-                  ? `${(
-                      (jd?.jd?.processing_metadata?.processing_time ??
-                        jd?.processing_metadata?.processing_time ??
-                        jd?.processing_time) as number
-                    ).toFixed(2)}s`
-                  : 'N/A'
-              }
-            />
-            <Row label="Text Length" value={jd?.jd?.processing_metadata?.text_length || jd?.jd?.text_info?.extracted_text_length || jd?.processing_metadata?.text_length || jd?.text_info?.extracted_text_length || jd?.text_length || 0} />
-          </div>
-        </div>
-      </div>
-      
-      {/* Optional: collapsible raw JSON for debugging */}
-      <div className="mt-2">
-        <button
-          className="inline-flex items-center text-xs text-gray-500 hover:text-gray-700"
-          onClick={() => setShowJSON((s) => !s)}
-        >
-          <ChevronDown className={`w-4 h-4 mr-1 transition-transform ${showJSON ? 'rotate-180' : ''}`} />
-          {showJSON ? 'Hide raw JSON' : 'Show raw JSON'}
-        </button>
-        {showJSON && (
-          <pre className="mt-2 text-xs bg-gray-50 p-3 rounded border max-h-60 overflow-auto">
-            {JSON.stringify(jd, null, 2)}
-          </pre>
-        )}
-      </div>
-    </div>
-  );
-}
+@router.post("/admin/jobs/post", response_model=JobPostingResponse)
+async def post_job(
+    file: UploadFile = File(...),
+    company_name: Optional[str] = Form(None),
+    additional_info: Optional[str] = Form(None)
+    # Add authentication here when ready: current_user = Depends(require_hr_user)
+) -> JobPostingResponse:
+    """
+    HR endpoint: Upload job description → create public link
+    
+    Pipeline:
+    1. Validate file upload
+    2. Extract text using parsing service
+    3. Process with LLM service (extract title, requirements, etc.)
+    4. Generate public access token
+    5. Store in job_postings_* collections
+    6. Also store in jd_* collections for main database view
+    7. Return public link
+    """
+    try:
+        logger.info(f"💼 HR job posting upload: {file.filename}")
+        
+        # 1. Validate file
+        validate_file_upload(file)
+        
+        job_id = str(uuid.uuid4())
+        jd_id = str(uuid.uuid4())  # Create a separate ID for the JD collection
+        public_token = generate_public_token()
+        
+        # 2. Extract text from file
+        file_content = await file.read()
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB")
+        
+        import tempfile
+        import shutil
+        import os
+        
+        # Get file extension for temp file
+        file_ext = '.' + file.filename.split('.')[-1].lower() if '.' in file.filename else '.txt'
+        
+        # Save to temporary file for parsing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
+        
+        try:
+            parsing_service = get_parsing_service()
+            parsed = parsing_service.process_document(tmp_path, "jd")
+            extracted_text = parsed["clean_text"]
+            raw_content = parsed["raw_text"]
+        finally:
+            # Clean up temporary file
+            os.unlink(tmp_path)
+        
+        if not extracted_text or len(extracted_text.strip()) < 100:
+            raise HTTPException(status_code=400, detail="Could not extract sufficient text from job description. Please check the file format.")
+        
+        # 3. Process with LLM service to extract structured data
+        llm_service = get_llm_service()
+        llm_result = llm_service.standardize_jd(extracted_text, file.filename)
+        
+        # Extract job title for response
+        job_title = "Position Available"
+        if llm_result and "structured_info" in llm_result:
+            job_title = llm_result["structured_info"].get("job_title", job_title)
+        
+        # 4. Generate embeddings
+        embedding_service = get_embedding_service()
+        embeddings_data = embedding_service.generate_document_embeddings(llm_result)
+        
+        # 5. Store in job_postings collections
+        qdrant = get_qdrant_utils()
+        success_steps = []
+        
+        # Store raw document with public token
+        success_steps.append(
+            qdrant.store_job_posting(
+                job_id, file.filename, extracted_text,
+                file.content_type or "application/octet-stream",
+                public_token, company_name
+            )
+        )
+        
+        # Store structured data
+        structured_payload = {
+            **llm_result,
+            "job_id": job_id,
+            "company_name": company_name,
+            "additional_info": additional_info,
+            "document_type": "job_posting"
+        }
+        success_steps.append(
+            qdrant.store_structured_data(job_id, "job_postings", structured_payload)
+        )
+        
+        # Store embeddings
+        success_steps.append(
+            qdrant.store_embeddings_exact(job_id, "job_postings", embeddings_data)
+        )
+        
+        # 6. Also store in main JD collections for database view
+        # Store raw document in JD collection
+        success_steps.append(
+            qdrant.store_document(
+                jd_id, "jd", file.filename,
+                file.content_type or "application/octet-stream",
+                extracted_text, _now_iso()
+            )
+        )
+        
+        # Store structured data in JD collection
+        jd_structured_payload = {
+            **llm_result,
+            "document_id": jd_id,
+            "document_type": "jd"
+        }
+        success_steps.append(
+            qdrant.store_structured_data(jd_id, "jd", jd_structured_payload)
+        )
+        
+        # Store embeddings in JD collection
+        success_steps.append(
+            qdrant.store_embeddings_exact(jd_id, "jd", embeddings_data)
+        )
+        
+        if not all(success_steps):
+            logger.error(f"❌ Failed to store job posting {job_id} - some steps failed: {success_steps}")
+            raise HTTPException(status_code=500, detail="Failed to create job posting. Please try again.")
+        
+        # 7. Build public link
+        # In production, use proper domain from config
+        base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        public_link = f"{base_url}/careers/jobs/{public_token}"
+        
+        logger.info(f"✅ Job posting created: {job_id} with public link")
+        
+        return JobPostingResponse(
+            job_id=job_id,
+            public_link=public_link,
+            public_token=public_token,
+            job_title=job_title,
+            upload_date=_now_iso(),
+            filename=file.filename,
+            is_active=True,
+            company_name=company_name
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to post job: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create job posting. Please try again later.")
+@router.get("/admin/jobs", response_model=List[JobPostingSummary])
+async def list_job_postings(
+    include_inactive: bool = False
+    # Add authentication: current_user = Depends(require_hr_user)
+) -> List[JobPostingSummary]:
+    """List all job postings for HR dashboard"""
+    try:
+        logger.info(f"📋 Listing job postings (include_inactive: {include_inactive})")
+        
+        qdrant = get_qdrant_utils()
+        job_postings = qdrant.get_all_job_postings(include_inactive)
+        
+        summaries = []
+        for job in job_postings:
+            # Get application count for this job
+            applications = qdrant.get_applications_for_job(job["id"])
+            
+            # Get structured data for job title
+            client = qdrant.client
+            structured_data = None
+            try:
+                res = client.retrieve("job_postings_structured", ids=[job["id"]], with_payload=True, with_vectors=False)
+                if res:
+                    structured_data = res[0].payload
+            except Exception:
+                structured_data = None
+            job_title = "Position Available"
+            if structured_data:
+                job_title = structured_data.get("structured_info", {}).get("job_title", job_title)
+            
+            summary = JobPostingSummary(
+                job_id=job["id"],
+                job_title=job_title,
+                company_name=job.get("company_name"),
+                upload_date=job["upload_date"],
+                filename=job["filename"],
+                is_active=job.get("is_active", True),
+                application_count=len(applications),
+                public_token=job["public_token"]
+            )
+            summaries.append(summary)
+        
+        logger.info(f"✅ Found {len(summaries)} job postings")
+        return summaries
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to list job postings: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve job postings")
 
-/* --------------------------------- Helpers -------------------------------- */
-function Row({ label, value, mono = false }: { label: string; value: any; mono?: boolean }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-gray-600">{label}:</span>
-      <span className={`font-medium ${mono ? 'font-mono text-xs truncate max-w-[220px]' : ''}`}>
-        {String(value ?? 'N/A')}
-      </span>
-    </div>
-  );
-}
+@router.patch("/admin/jobs/{job_id}/status", response_model=dict)
+async def toggle_job_status(
+    job_id: str, 
+    status_update: JobStatusUpdate
+    # Add authentication: current_user = Depends(require_hr_user)
+) -> dict:
+    """Activate/deactivate job postings"""
+    try:
+        logger.info(f"🔄 Updating job {job_id} status to: {status_update.is_active}")
+        
+        qdrant = get_qdrant_utils()
+        success = qdrant.update_job_posting_status(job_id, status_update.is_active)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Job posting not found")
+        
+        return {
+            "success": True,
+            "job_id": job_id,
+            "is_active": status_update.is_active,
+            "message": f"Job posting {'activated' if status_update.is_active else 'deactivated'} successfully",
+            "reason": status_update.reason
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update job status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update job status")
+
+@router.get("/admin/jobs/{job_id}/applications", response_model=List[JobApplicationSummary])
+async def get_job_applications(
+    job_id: str
+    # Add authentication: current_user = Depends(require_hr_user)
+) -> List[JobApplicationSummary]:
+    """Get all applications for a specific job"""
+    try:
+        logger.info(f"📋 Getting applications for job: {job_id}")
+        
+        qdrant = get_qdrant_utils()
+        
+        # Verify job exists
+        job_data = qdrant.get_job_posting_by_id(job_id)
+        if not job_data:
+            raise HTTPException(status_code=404, detail="Job posting not found")
+        
+        # Get applications
+        applications = qdrant.get_applications_for_job(job_id)
+        
+        summaries = []
+        for app in applications:
+            summary = JobApplicationSummary(
+                application_id=app["id"],
+                job_id=job_id,
+                applicant_name=app.get("applicant_name", "Unknown"),
+                applicant_email=app.get("applicant_email", "unknown@email.com"),
+                application_date=app.get("application_date", "Unknown"),
+                cv_filename=app.get("cv_filename", "unknown.pdf"),
+                match_score=None,  # TODO: Calculate match score if needed
+                status=app.get("status", "pending")
+            )
+            summaries.append(summary)
+        
+        logger.info(f"✅ Found {len(summaries)} applications for job {job_id}")
+        return summaries
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get job applications: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve applications")
+
+@router.get("/admin/health", response_model=CareersHealthResponse)
+async def careers_health_check() -> CareersHealthResponse:
+    """Health check endpoint for careers functionality"""
+    try:
+        qdrant = get_qdrant_utils()
+        stats = qdrant.get_careers_stats()
+        
+        status = "healthy"
+        if stats.get("error") or any(
+            col_status.get("status") == "unhealthy" 
+            for col_status in stats.get("collections_status", {}).values()
+        ):
+            status = "degraded"
+        
+        return CareersHealthResponse(
+            status=status,
+            job_postings_count=stats.get("job_postings_count", 0),
+            applications_count=stats.get("applications_count", 0),
+            active_jobs_count=stats.get("active_jobs_count", 0),
+            collections_status=stats.get("collections_status", {})
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Careers health check failed: {e}")
+        return CareersHealthResponse(
+            status="unhealthy",
+            job_postings_count=0,
+            applications_count=0,
+            active_jobs_count=0,
+            collections_status={"error": str(e)}
+        )
+
+# ==================== UTILITY ENDPOINTS ====================
+
+@router.get("/jobs/{public_token}/info")
+async def get_job_info(public_token: str) -> dict:
+    """Get basic job info without full details (for previews, etc.)"""
+    try:
+        qdrant = get_qdrant_utils()
+        job_data = qdrant.get_job_posting_by_token(public_token)
+        
+        if not job_data:
+            raise HTTPException(status_code=404, detail="Job posting not found")
+        
+        return {
+            "job_id": job_data["id"],
+            "is_active": job_data.get("is_active", True),
+            "company_name": job_data.get("company_name", "Our Company"),
+            "upload_date": job_data["upload_date"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get job info: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve job information")
