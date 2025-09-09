@@ -1,128 +1,397 @@
-"""
-Careers Schemas - Public Job Postings & Applications
-Pydantic models for the careers page functionality where:
-- HR posts jobs and gets public links
-- Public users view jobs and apply without authentication
-- Applications are processed through existing CV pipeline
-"""
+// Base types
+export interface BaseDocument {
+  id: string;
+  filename: string;
+  upload_date: string;
+  has_structured_data: boolean;
+}
 
-from pydantic import BaseModel, Field, EmailStr
-from typing import Optional, List
-from datetime import datetime
+// CV types
+export interface CVListItem extends BaseDocument {
+  full_name: string;
+  job_title: string;
+  years_of_experience: string;
+  skills_count: number;
+  skills: string[];
+  responsibilities_count: number;
+  text_length: number;
+}
 
+export interface CVDataResponse {
+  id: string;
+  filename: string;
+  upload_date: string;
+  document_type: "cv";
+  candidate: {
+    full_name: string;
+    job_title: string;
+    years_of_experience: string;
+    skills: string[];
+    responsibilities: string[];
+    skills_count: number;
+    responsibilities_count: number;
+  };
+  text_info: {
+    extracted_text_length: number;
+    extracted_text_preview: string;
+  };
+  embeddings_info: {
+    skills_embeddings: number;
+    responsibilities_embeddings: number;
+    has_title_embedding: boolean;
+    has_experience_embedding: boolean;
+    embedding_dimension: number;
+  };
+  structured_info: any;
+  processing_metadata: any;
+}
 
-class JobPostingCreate(BaseModel):
-    """Request model for creating a new job posting"""
-    company_name: Optional[str] = Field(None, max_length=200, description="Company name for branding")
-    additional_info: Optional[str] = Field(None, max_length=1000, description="Additional context for job posting")
+// JD types
+export interface JDListItem extends BaseDocument {
+  job_title: string;
+  years_of_experience: string;
+  skills_count: number;
+  skills: string[];
+  responsibilities_count: number;
+  text_length: number;
+}
 
+export interface JDDataResponse {
+  id: string;
+  filename: string;
+  upload_date: string;
+  document_type: "jd";
+  job_requirements: {
+    job_title: string;
+    years_of_experience: string;
+    skills: string[];
+    responsibilities: string[];
+    skills_count: number;
+    responsibilities_count: number;
+  };
+  text_info: {
+    extracted_text_length: number;
+    extracted_text_preview: string;
+  };
+  embeddings_info: {
+    skills_embeddings: number;
+    responsibilities_embeddings: number;
+    has_title_embedding: boolean;
+    has_experience_embedding: boolean;
+    embedding_dimension: number;
+  };
+  structured_info: any;
+  processing_metadata: any;
+}
 
-class JobPostingResponse(BaseModel):
-    """Response model after successful job posting creation"""
-    job_id: str = Field(..., description="Unique identifier for the job posting")
-    public_link: str = Field(..., description="Public URL where candidates can view and apply")
-    public_token: str = Field(..., description="Public token for the job posting")  # Add this line
-    job_title: Optional[str] = Field(None, description="Extracted job title from the job description")
-    upload_date: str = Field(..., description="ISO timestamp when job was posted")
-    filename: str = Field(..., description="Original filename of uploaded job description")
-    is_active: bool = Field(True, description="Whether the job posting is currently accepting applications")
-    company_name: Optional[str] = Field(None, description="Company name associated with posting")
+// API Response types
+export interface CVListResponse {
+  status: string;
+  count: number;
+  cvs: CVListItem[];
+}
 
-class PublicJobView(BaseModel):
-    """Public-facing model for job postings (no sensitive data)"""
-    job_id: str = Field(..., description="Unique identifier for the job posting")
-    job_title: Optional[str] = Field("Position Available", description="Job title or position name")
-    company_name: Optional[str] = Field("Our Company", description="Company name for branding")
-    job_description: str = Field(..., description="Full job description text")
-    upload_date: str = Field(..., description="When this job was posted")
-    requirements: Optional[List[str]] = Field([], description="List of required skills and qualifications")
-    responsibilities: Optional[List[str]] = Field([], description="List of job responsibilities and duties")
-    experience_required: Optional[str] = Field("Not specified", description="Required years of experience")
-    is_active: bool = Field(True, description="Whether the job is currently accepting applications")
+export interface JDListResponse {
+  status: string;
+  count: number;
+  jds: JDListItem[];
+}
 
+export interface UploadResponse {
+  status: string;
+  message: string;
+  cv_id?: string;
+  jd_id?: string;
+  filename: string;
+  standardized_data: any;
+  processing_stats: {
+    text_length: number;
+    skills_count: number;
+    responsibilities_count: number;
+    embeddings_generated: number;
+  };
+}
 
-class JobApplicationRequest(BaseModel):
-    """Request model for job applications"""
-    job_id: str = Field(..., description="ID of the job being applied to")
-    applicant_name: str = Field(..., min_length=2, max_length=100, description="Full name of the applicant")
-    applicant_email: EmailStr = Field(..., description="Valid email address for contact")
-    applicant_phone: Optional[str] = Field(None, max_length=20, description="Phone number (optional)")
-    cover_letter: Optional[str] = Field(None, max_length=2000, description="Optional cover letter or message")
+export interface StandardizeResponse {
+  status: string;
+  message: string;
+  filename: string;
+  standardized_data: any;
+  processing_stats: {
+    input_text_length: number;
+    skills_count: number;
+    responsibilities_count: number;
+    embeddings_info: {
+      skills_count: number;
+      responsibilities_count: number;
+      vector_dimension: number;
+    };
+  };
+}
 
+// Matching types
+export interface MatchWeights {
+  skills: number;
+  responsibilities: number;
+  job_title: number;
+  experience: number;
+}
 
-class JobApplicationResponse(BaseModel):
-    """Response model after application submission"""
-    success: bool = Field(..., description="Whether the application was successfully submitted")
-    application_id: str = Field(..., description="Unique identifier for this application")
-    message: str = Field(..., description="Confirmation message for the applicant")
-    next_steps: Optional[str] = Field(None, description="Information about what happens next")
+export interface MatchRequest {
+  jd_id?: string;
+  jd_text?: string;
+  cv_ids?: string[];
+  weights?: MatchWeights;
+  top_alternatives?: number;
+}
 
+export interface AssignmentItem {
+  type: "skill" | "responsibility";
+  jd_index: number;
+  jd_item: string;
+  cv_index: number;
+  cv_item: string;
+  score: number;
+}
 
-class JobApplicationSummary(BaseModel):
-    """Summary model for applications (for HR dashboard)"""
-    application_id: str = Field(..., description="Unique application identifier")
-    job_id: str = Field(..., description="Job this application is for")
-    applicant_name: str = Field(..., description="Name of the applicant")
-    applicant_email: str = Field(..., description="Email of the applicant")
-    application_date: str = Field(..., description="When the application was submitted")
-    cv_filename: str = Field(..., description="Original filename of submitted CV")
-    match_score: Optional[float] = Field(None, description="AI-calculated match score if available")
-    status: str = Field("pending", description="Application status (pending, reviewed, etc.)")
+export interface AlternativesItem {
+  jd_index: number;
+  items: {
+    cv_index: number;
+    cv_item: string;
+    score: number;
+  }[];
+}
 
+export interface CandidateBreakdown {
+  cv_id: string;
+  cv_name: string;
+  cv_job_title: string;
+  cv_years: number;
+  skills_score: number;
+  responsibilities_score: number;
+  job_title_score: number;
+  years_score: number;
+  overall_score: number;
+  skills_assignments: AssignmentItem[];
+  responsibilities_assignments: AssignmentItem[];
+  skills_alternatives: AlternativesItem[];
+  responsibilities_alternatives: AlternativesItem[];
+}
 
-class JobPostingSummary(BaseModel):
-    """Summary model for job postings (for HR dashboard)"""
-    job_id: str = Field(..., description="Unique job identifier")
-    job_title: Optional[str] = Field(None, description="Job title")
-    company_name: Optional[str] = Field(None, description="Company name")
-    upload_date: str = Field(..., description="When job was posted")
-    filename: str = Field(..., description="Original filename")
-    is_active: bool = Field(..., description="Whether job is active")
-    application_count: int = Field(0, description="Number of applications received")
-    public_token: str = Field(..., description="Public access token for the job")  # Add this line
+export interface MatchResponse {
+  jd_id: string;
+  jd_job_title: string;
+  jd_years: number;
+  normalized_weights: MatchWeights;
+  candidates: CandidateBreakdown[];
+}
 
-class JobStatusUpdate(BaseModel):
-    """Request model for updating job posting status"""
-    is_active: bool = Field(..., description="New active status for the job")
-    reason: Optional[str] = Field(None, max_length=500, description="Reason for status change")
+// System types
+export interface HealthResponse {
+  status: string;
+  timestamp: number;
+  services: {
+    qdrant: any;
+    embedding: any;
+    cache: any;
+  };
+  environment: {
+    openai_key_configured: boolean;
+    qdrant_host: string;
+    qdrant_port: string;
+  };
+}
 
+export interface SystemStatsResponse {
+  status: string;
+  stats: {
+    database_stats: {
+      total_cvs: number;
+      total_jds: number;
+      total_documents: number;
+    };
+    cv_analytics: {
+      total_cvs: number;
+      avg_skills_per_cv: number;
+      max_skills_per_cv: number;
+      min_skills_per_cv: number;
+    };
+    jd_analytics: {
+      total_jds: number;
+      avg_skills_per_jd: number;
+      max_skills_per_jd: number;
+      min_skills_per_jd: number;
+    };
+    cache_stats: any;
+    system_info: {
+      embedding_model: string;
+      embedding_dimension: number;
+      llm_model: string;
+      similarity_metric: string;
+    };
+  };
+  timestamp: number;
+}
 
-class ApplicationStatusUpdate(BaseModel):
-    """Request model for updating application status"""
-    status: str = Field(..., description="New status for the application")
-    notes: Optional[str] = Field(None, max_length=1000, description="HR notes about the application")
+export interface DatabaseStatusResponse {
+  status: string;
+  collections: {
+    name: string;
+    points_count: number;
+    vector_config: any;
+    status: string;
+    indexed_vectors_count: number;
+  }[];
+  total_collections: number;
+  timestamp: number;
+}
 
+export interface EmbeddingsInfoResponse {
+  status: string;
+  embeddings_info: {
+    [key: string]: {
+      embeddings_found: boolean;
+      skills: { count: number; embedding_dimension: number };
+      responsibilities: { count: number; embedding_dimension: number };
+      title_embedding: boolean;
+      experience_embedding: boolean;
+      total_embeddings: number;
+    };
+  };
+  embedding_model: string;
+  vector_dimensions: number;
+  distance_metric: string;
+  timestamp: number;
+}
 
-class JobMatchingRequest(BaseModel):
-    """Request model for matching applications to a job"""
-    job_id: str = Field(..., description="Job to match applications against")
-    include_inactive: bool = Field(False, description="Whether to include inactive applications")
-    min_score: Optional[float] = Field(None, description="Minimum match score threshold")
+export interface CVDataResponse {
+  status: string;
+  cv_id: string;
+  storage_locations: {
+    documents: any;
+    structured: any;
+    embeddings: any;
+  };
+  timestamp: number;
+}
 
+export interface JDDataResponse {
+  status: string;
+  jd_id: string;
+  storage_locations: {
+    documents: any;
+    structured: any;
+    embeddings: any;
+  };
+  timestamp: number;
+}
 
-class JobMatchingResponse(BaseModel):
-    """Response model for job matching results"""
-    job_id: str = Field(..., description="Job ID that was matched")
-    job_title: Optional[str] = Field(None, description="Job title")
-    total_applications: int = Field(..., description="Total number of applications")
-    matched_applications: List[JobApplicationSummary] = Field(..., description="Applications with match scores")
-    top_candidates: List[JobApplicationSummary] = Field(..., description="Top 10 candidates by score")
+export interface DatabaseViewResponse {
+  success: boolean;
+  data: {
+    cvs: any[];
+    jds: any[];
+    summary: {
+      total_documents: number;
+      total_cvs: number;
+      total_jds: number;
+      avg_cv_skills: number;
+      avg_jd_skills: number;
+      ready_for_matching: boolean;
+    };
+  };
+  timestamp: number;
+}
 
+// Auth types
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
 
-# Error response models
-class CareersErrorResponse(BaseModel):
-    """Standard error response for careers endpoints"""
-    error: str = Field(..., description="Error type")
-    message: str = Field(..., description="Human-readable error message")
-    details: Optional[str] = Field(None, description="Additional error details")
-    status_code: int = Field(..., description="HTTP status code")
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  username: string;
+  role: 'admin' | 'user';
+}
 
+export interface UserProfile {
+  id: string;
+  username: string;
+  role: 'admin' | 'user';
+  is_active: boolean;
+}
 
-# Health check model
-class CareersHealthResponse(BaseModel):
-    """Health check response for careers functionality"""
-    status: str = Field(..., description="Overall health status")
-    job_postings_count: int = Field(..., description="Total number of job postings")
-    applications_count: int = Field(..., description="Total number of applications")
-    active_jobs_count: int = Field(..., description="Number of active job postings")
-    collections_status: dict = Field(..., description="Status of Qdrant collections")
+export interface AdminUser {
+  id: string;
+  username: string;
+  role: 'admin' | 'user';
+  is_active: boolean;
+}
+
+export interface CreateUserRequest {
+  username: string;
+  password: string;
+  role: 'admin' | 'user';
+}
+
+export interface UpdateUserRequest {
+  password?: string;
+  role?: 'admin' | 'user';
+  is_active?: boolean;
+}
+
+// Careers types
+export interface JobPostingResponse {
+  job_id: string;
+  public_link: string;
+  public_token: string; // Added this field
+  job_title?: string;
+  upload_date: string;
+  filename: string;
+  is_active: boolean;
+  company_name?: string;
+}
+
+export interface PublicJobView {
+  job_id: string;
+  job_title?: string;
+  company_name?: string;
+  job_description: string;
+  upload_date: string;
+  requirements?: string[];
+  responsibilities?: string[];
+  experience_required?: string;
+  is_active: boolean;
+}
+
+export interface JobApplicationResponse {
+  success: boolean;
+  application_id: string;
+  message: string;
+  next_steps?: string;
+}
+
+export interface JobPostingListItem {
+  job_id: string;
+  job_title?: string;
+  filename: string;
+  upload_date: string;
+  is_active: boolean;
+  application_count?: number;
+  public_token: string; // Already present
+}
+
+export interface JobApplicationListItem {
+  application_id: string;
+  job_id: string;
+  applicant_name: string;
+  applicant_email: string;
+  applicant_phone?: string;
+  cv_filename: string;
+  application_date: string;
+  match_score?: number;
+  status?: string;
+}
